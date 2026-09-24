@@ -1,0 +1,11 @@
+# Image Captioning Backend
+
+## Technologies
+- Python
+- FastAPI
+- Pillow
+
+## Installation
+
+```bash
+pip install -r backend/requirements.txt
