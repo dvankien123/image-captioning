@@ -1,13 +1,18 @@
-import asyncio
+from backend.services.mock_model import DummyImageModel
+
+# Tạo một biến toàn cục để lưu trữ instance của model
+ml_models = {}
 
 async def generate_caption(image_path: str) -> str:
     """
-    Hàm giả lập gọi model AI. 
-    Sau này bạn sẽ thay phần ruột của hàm này bằng code gọi model thực tế 
-    (ví dụ: load model PyTorch, truyền ảnh qua model và nhận kết quả).
+    Lấy model đã được load sẵn từ biến ml_models để dự đoán
     """
-    # Giả lập thời gian model đang suy nghĩ (2 giây)
-    await asyncio.sleep(2)
+    # Kiểm tra xem model đã có trong bộ nhớ chưa
+    if "caption_model" not in ml_models:
+        return "Lỗi: Model chưa được khởi tạo!"
     
-    # Trả về một caption giả để frontend có data làm giao diện
-    return "Một người đang đi dạo trong công viên vào buổi chiều."
+    # Gọi hàm dự đoán của model đã lưu
+    model = ml_models["caption_model"]
+    caption = await model.predict(image_path)
+    
+    return caption

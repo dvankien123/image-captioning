@@ -7,9 +7,10 @@ from backend.services.model_service import generate_caption
 router = APIRouter()
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-ALLOWED_EXTENSIONS = {"image/jpeg", "image/png", "image/jpg"}
 
-# Hàm tiện ích để xóa file
+ALLOWED_EXTENSIONS = {"image/jpeg", "image/png", "image/jpg"}
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB (tính bằng Byte)
+
 def remove_file(path: str):
     try:
         if os.path.exists(path):
@@ -20,11 +21,20 @@ def remove_file(path: str):
 @router.post("/upload")
 async def upload_image(
     file: UploadFile = File(...), 
-    background_tasks: BackgroundTasks = BackgroundTasks() # Thêm tham số này
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ):
+    # 1. Kiểm tra định dạng
     if file.content_type not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Vui lòng upload ảnh JPG hoặc PNG.")
+        
+    # 2. Kiểm tra dung lượng file
+    if file.size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413, 
+            detail=f"Dung lượng ảnh quá lớn ({file.size / (1024*1024):.1f}MB). Tối đa chỉ cho phép 5MB."
+        )
     
+    # 3. Lưu file
     new_filename = f"{uuid.uuid4()}.{file.filename.split('.')[-1]}"
     file_path = os.path.join(UPLOAD_DIR, new_filename)
     
@@ -36,10 +46,8 @@ async def upload_image(
     finally:
         file.file.close()
         
-    # Lấy caption từ model
+    # 4. Gọi Model & Đặt lịch xóa ảnh
     caption_result = await generate_caption(file_path)
-    
-    # Đặt lịch xóa file ảnh sau khi API chạy xong
     background_tasks.add_task(remove_file, file_path)
         
     return {
