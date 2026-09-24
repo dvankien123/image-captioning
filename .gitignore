@@ -1,4 +1,9 @@
-data/raw/
+# Ignore thư mục môi trường ảo
+venv/
 
-.idea/
-.ipynb_checkpoints/
+# Ignore thư mục lưu ảnh upload
+temp_uploads/
+
+# Python cache
+__pycache__/
+*.pyc
