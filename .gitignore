@@ -1,6 +1,5 @@
-data/raw/
-data/processed
-data/splits
+data/**/*
+!data/**/.gitkeep
 
 .idea/
 notebooks/.ipynb_checkpoints/
