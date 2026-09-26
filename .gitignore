@@ -1,4 +1,6 @@
 data/raw/
+data/processed
+data/splits
 
 .idea/
-.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
