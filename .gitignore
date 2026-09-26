@@ -1,5 +1,17 @@
-data/**/*
-!data/**/.gitkeep
+data/*
+!data/.gitkeep
+!data/processed/
+!data/raw/
+!data/splits/
+
+data/processed/*
+!data/processed/.gitkeep
+
+data/raw/*
+!data/raw/.gitkeep
+
+data/splits/*
+!data/splits/.gitkeep
 
 .idea/
 notebooks/.ipynb_checkpoints/
