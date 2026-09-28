@@ -9,7 +9,7 @@ def get_train_transform():
         transforms.RandomCrop(224),
         transforms.RandomHorizontalFlip(p = 0.5),
         transforms.ToTensor(),
-        transfroms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
     ])
     return transform
 def get_eval_transform():
