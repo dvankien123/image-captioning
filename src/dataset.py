@@ -1,10 +1,11 @@
 import json
 import pandas as pd
 import torch
+from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 from PIL import Image
 
-class Dataset:
+class Flickr30kDataset(Dataset):
     def __init__(self, vocab, transform):
         self.vocab = vocab
         self.transform = transform
@@ -42,3 +43,4 @@ class Dataset:
         captions_padded = pad_sequence(captions, batch_first = True, padding_value = 0)
 
         return images, captions_padded, lengths
+
