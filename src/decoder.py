@@ -24,8 +24,9 @@ class Decoder(nn.Module):
             inputs, lengths, batch_first=True, enforce_sorted=False
         )
 
-        hiddens, _ = self.lstm(packed)  # PackedSequence
-        outputs = self.fc(hiddens.data)  # (sum(lengths), vocab_size)
+        hiddens, _ = self.lstm(packed)
+        # outputs = self.fc(self.dropout(hiddens.data))
+        outputs = self.fc(hiddens.data)
         return outputs
     def sample(self, features, max_len=30):
         batch_size = features.size(0)

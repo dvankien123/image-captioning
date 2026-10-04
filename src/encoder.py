@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torchvision import models
 
-class EncoderCNN(nn.Module):
+class Encoder(nn.Module):
     def __init__(self, embed_size):
         super().__init__()
 
