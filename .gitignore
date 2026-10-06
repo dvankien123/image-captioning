@@ -13,5 +13,9 @@ data/raw/*
 data/splits/*
 !data/splits/.gitkeep
 
+checkpoints/*
+!checkpoints/.gitkeep
+
 .idea/
 notebooks/.ipynb_checkpoints/
+
