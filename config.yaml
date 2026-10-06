@@ -1,0 +1,28 @@
+paths:
+  images: data/raw/flickr30k_images/flickr30k_images
+  captions: data/raw/flickr30k_images/results.csv
+  train_json: data/splits/train.json
+  val_json: data/splits/val.json
+  vocab: data/processed/vocab.pickle
+  checkpoint: checkpoints/best_model.pth
+data:
+  freq_threshold: 5        # từ xuất hiện < 5 lần -> <unk>
+  max_len: 30               # độ dài caption tối đa (dùng khi lọc/sinh)
+  image_size: 224
+model:
+  embed_size: 256            # chiều embedding (ảnh & từ dùng chung)
+  hidden_size: 512           # chiều hidden state của LSTM
+  num_layers: 1               # số lớp LSTM xếp chồng
+  dropout: 0.5
+  train_backbone: false
+train:
+  seed: 42
+  batch_size: 64
+  lr: 0.0003                  # learning rate cho dec oder + lớp fc/bn của encoder
+  lr_finetune: 0.00001        # learning rate riêng cho layer4 của ResNet khi fine-tune
+  epochs: 30
+  grad_clip: 5.0
+  num_workers: 4
+  early_stopping_patience: 5
+  lr_scheduler_patience: 2
+  lr_scheduler_factor: 0.5
