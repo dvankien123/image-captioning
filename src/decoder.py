@@ -17,16 +17,15 @@ class Decoder(nn.Module):
         self.fc = nn.Linear(hidden_size, vocab_size)
     def forward(self, features, captions, lengths):
         embeddings = self.embed(captions)
-
         inputs = torch.cat((features.unsqueeze(1), embeddings), dim=1)
 
         packed = pack_padded_sequence(
-            inputs, lengths, batch_first=True, enforce_sorted=False
+            inputs, lengths.cpu(),
+            batch_first=True, enforce_sorted=False
         )
 
         hiddens, _ = self.lstm(packed)
-        # outputs = self.fc(self.dropout(hiddens.data))
-        outputs = self.fc(hiddens.data)
+        outputs = self.fc(self.dropout(hiddens.data))
         return outputs
     def sample(self, features, max_len=30):
         batch_size = features.size(0)

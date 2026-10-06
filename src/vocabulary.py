@@ -14,6 +14,7 @@ class Vocabulary:
 
     def build_vocabulary(self, captions):
         freq_counter = Counter()
+
         for caption in captions:
             tokenized_caption = self.tokenize(caption)
             freq_counter.update(tokenized_caption)
@@ -23,21 +24,26 @@ class Vocabulary:
                     self.word2idx[token] = self.idx
                     self.idx2word[self.idx] = token
                     self.idx += 1
+
+    def __len__(self):
+        return len(self.word2idx)
+
     def numericalize(self, caption):
         tokenized_caption = self.tokenize(caption)
         return [self.word2idx["<start>"]] + [self.word2idx[token] if token in self.word2idx else self.word2idx["<unk>"]
                 for token in tokenized_caption] + [self.word2idx["<end>"]]
 
-    def __len__(self):
-        return len(self.word2idx)
+    def denumericalize(self, ids):
+        ids = ids[1:(len(self) - 1)]
+        return [self.idx2word[id] for id in ids]
 
-    def save(self):
-        with open("../data/processed/vocab.pkl", "wb") as f:
+    def save(self, vocab_dir):
+        with open(vocab_dir, "wb") as f:
             pickle.dump(self, f)
 
     @staticmethod
-    def load():
-        with open("../data/processed/vocab.pkl", "rb") as f:
+    def load(vocab_dir):
+        with open(vocab_dir, "rb") as f:
             return pickle.load(f)
 
 
