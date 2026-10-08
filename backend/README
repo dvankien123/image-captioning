@@ -1,11 +1,5 @@
-# Image Captioning Backend
+# Backend
 
-## Technologies
-- Python
-- FastAPI
-- Pillow
+See the repository README for installation, configuration, API endpoints, and run instructions. Install runtime dependencies from the repository root with:
 
-## Installation
-
-```bash
-pip install -r backend/requirements.txt
+    pip install -r backend/requirements.txt

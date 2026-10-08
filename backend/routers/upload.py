@@ -1,106 +1,164 @@
-import os
-import shutil
+import asyncio
+import time
 import uuid
-from backend.services.model_service import generate_caption 
-from backend.core.config import settings
-from backend.core.logger import logger
+from io import BytesIO
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy.orm import Session
-from backend.core.database import get_db
+
+from backend.core.config import settings
+from backend.core.database import SessionLocal, get_db
+from backend.core.logger import logger
 from backend.models.caption_record import CaptionRecord
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
-from backend.services.vector_db import add_caption_to_vector_db, search_similar_images
-
-
+from backend.services.model_service import caption_model_service
 
 router = APIRouter()
-UPLOAD_DIR = "temp_uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-ALLOWED_EXTENSIONS = {"image/jpeg", "image/png", "image/jpg"}
+UPLOAD_DIR = Path(settings.UPLOAD_DIR)
+ALLOWED_TYPES = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png"}
 MAX_FILE_SIZE = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 
-def remove_file(path: str):
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-            logger.info(f"Đã dọn dẹp file tạm thành công: {path}")
-    except Exception as e:
-        # Ghi nhận lỗi nghiêm trọng bằng logger.error
-        logger.error(f"Lỗi hệ thống khi xóa file {path}: {e}")
+
+def _save_caption(filename: str, caption: str) -> dict:
+    with SessionLocal() as db:
+        record = CaptionRecord(filename=filename, caption=caption)
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        return {"id": record.id, "original_filename": record.filename, "caption": record.caption}
+
+
+def _safe_filename(filename: str | None) -> str:
+    name = (filename or "upload").replace("\\", "/").rsplit("/", 1)[-1]
+    cleaned = "".join(char for char in name if char.isprintable() and char not in "\r\n\0")
+    return cleaned[:255] or "upload"
+
+
+def _validate_image(content: bytes, content_type: str) -> None:
+    with Image.open(BytesIO(content)) as image:
+        expected_format = "JPEG" if content_type in {"image/jpeg", "image/jpg"} else "PNG"
+        if image.format != expected_format:
+            raise ValueError("Image format does not match the declared content type.")
+        if image.width * image.height > settings.MAX_IMAGE_PIXELS:
+            raise OverflowError("Image resolution exceeds the configured limit.")
+        image.verify()
+
 
 @router.post("/upload")
 async def upload_image(
-    file: UploadFile = File(...), 
-    background_tasks: BackgroundTasks = BackgroundTasks(),
-    db: Session = Depends(get_db)
+    request: Request,
+    file: UploadFile = File(...),
 ):
-    logger.info(f"Nhận yêu cầu phân tích ảnh: {file.filename}")
-    # 1. Kiểm tra định dạng
-    if file.content_type not in ALLOWED_EXTENSIONS:
+    started_at = time.perf_counter()
+
+    if file.content_type not in ALLOWED_TYPES:
+        await file.close()
         raise HTTPException(status_code=400, detail="Vui lòng upload ảnh JPG hoặc PNG.")
-        
-    # 2. Kiểm tra dung lượng file
-    if file.size > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=413, 
-            detail=f"Dung lượng ảnh quá lớn ({file.size / (1024*1024):.1f}MB). Tối đa chỉ cho phép 5MB."
+    if not getattr(request.app.state, "model_ready", False):
+        await file.close()
+        raise HTTPException(status_code=503, detail="Model chưa sẵn sàng. Hãy cấu hình checkpoint đã huấn luyện.")
+
+    if file.size is not None and file.size > MAX_FILE_SIZE:
+        await file.close()
+        raise HTTPException(status_code=413, detail="Ảnh vượt quá dung lượng cho phép.")
+
+    try:
+        content = await file.read(MAX_FILE_SIZE + 1)
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="Ảnh vượt quá dung lượng cho phép.")
+
+        try:
+            await run_in_threadpool(_validate_image, content, file.content_type)
+        except OverflowError as exc:
+            raise HTTPException(status_code=413, detail="Độ phân giải ảnh vượt quá giới hạn cho phép.") from exc
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+            raise HTTPException(status_code=400, detail="File ảnh không hợp lệ hoặc bị hỏng.") from exc
+
+        await run_in_threadpool(UPLOAD_DIR.mkdir, parents=True, exist_ok=True)
+        file_path = UPLOAD_DIR / f"{uuid.uuid4().hex}{ALLOWED_TYPES[file.content_type]}"
+        await run_in_threadpool(file_path.write_bytes, content)
+
+        semaphore = request.app.state.inference_semaphore
+        try:
+            await asyncio.wait_for(
+                semaphore.acquire(),
+                timeout=settings.INFERENCE_QUEUE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=429,
+                detail="Model đang bận. Vui lòng thử lại sau.",
+                headers={"Retry-After": "5"},
+            ) from exc
+
+        try:
+            inference = asyncio.create_task(
+                run_in_threadpool(caption_model_service.predict, str(file_path))
+            )
+            try:
+                caption = await asyncio.shield(inference)
+            except asyncio.CancelledError:
+                try:
+                    await inference
+                finally:
+                    raise
+        except (OSError, ValueError) as exc:
+            logger.info("Invalid image rejected during preprocessing: %s", exc)
+            raise HTTPException(status_code=400, detail="Không thể đọc nội dung ảnh.") from exc
+        except RuntimeError as exc:
+            logger.exception("Model inference failed")
+            raise HTTPException(status_code=503, detail="Model hiện chưa thể xử lý ảnh.") from exc
+        finally:
+            semaphore.release()
+
+        if not caption:
+            raise HTTPException(status_code=422, detail="Model không sinh được caption cho ảnh này.")
+
+        result = await run_in_threadpool(
+            _save_caption,
+            _safe_filename(file.filename),
+            caption,
         )
-    
-    # 3. Lưu file
-    new_filename = f"{uuid.uuid4()}.{file.filename.split('.')[-1]}"
-    file_path = os.path.join(UPLOAD_DIR, new_filename)
-    
-    try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi hệ thống: {str(e)}")
+        logger.info(
+            "Captioned upload %s in %.2f seconds",
+            result["id"],
+            time.perf_counter() - started_at,
+        )
+        return {"status": "success", "data": result}
+    except HTTPException:
+        raise
+    except OSError as exc:
+        logger.exception("Upload could not be stored")
+        raise HTTPException(status_code=500, detail="Không thể xử lý file upload.") from exc
+    except Exception as exc:
+        logger.exception("Unexpected upload processing failure")
+        raise HTTPException(status_code=500, detail="Lỗi hệ thống khi xử lý ảnh.") from exc
     finally:
-        file.file.close()
-        
-    # 4. Gọi Model & Đặt lịch xóa ảnh
-    caption_result = await generate_caption(file_path)
-    background_tasks.add_task(remove_file, file_path)
-        
-    # 5. Lưu thông tin vào SQLite
-    new_record = CaptionRecord(
-        filename=file.filename,
-        caption=caption_result
-    )
-    db.add(new_record)
-    db.commit()
-    db.refresh(new_record) # Lấy ID mới tạo để trả về
-    logger.info(f"Đã lưu kết quả vào database với ID: {new_record.id}")
+        if "file_path" in locals():
+            await run_in_threadpool(file_path.unlink, missing_ok=True)
+        await file.close()
 
-    add_caption_to_vector_db(new_record.id, new_record.filename, new_record.caption)
 
-    return {
-        "status": "success",
-        "data": {
-            "id": new_record.id,
-            "original_filename": new_record.filename,
-            "caption": new_record.caption
-        }
-    }
-
-# --- THÊM MỘT API ĐỂ XEM LẠI LỊCH SỬ ---
 @router.get("/history")
-def get_upload_history(limit: int = 10, db: Session = Depends(get_db)):
-    """API hỗ trợ lấy 10 bức ảnh đã phân tích gần nhất"""
-    records = db.query(CaptionRecord).order_by(CaptionRecord.id.desc()).limit(limit).all()
-    return {"status": "success", "data": records}
-
-@router.get("/search")
-def search_images(query: str, top_k: int = 3):
-    """API Tìm kiếm ảnh bằng ngữ nghĩa (Semantic Search)"""
-    logger.info(f"Nhận yêu cầu tìm kiếm ảnh với từ khóa: '{query}'")
-    try:
-        results = search_similar_images(query, top_k)
-        return {
-            "status": "success", 
-            "query": query,
-            "data": results
-        }
-    except Exception as e:
-        logger.error(f"Lỗi khi tìm kiếm: {e}")
-        raise HTTPException(status_code=500, detail="Lỗi hệ thống khi tìm kiếm vector")
+def get_upload_history(
+    limit: int = 10,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    if not 1 <= limit <= settings.HISTORY_MAX_LIMIT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"limit phải nằm trong khoảng 1 đến {settings.HISTORY_MAX_LIMIT}.",
+        )
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset không được âm.")
+    records = (
+        db.query(CaptionRecord)
+        .order_by(CaptionRecord.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {"status": "success", "data": records, "limit": limit, "offset": offset}
