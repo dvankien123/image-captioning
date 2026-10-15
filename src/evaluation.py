@@ -1,0 +1,175 @@
+"""Evaluate generated validation captions with corpus BLEU scores."""
+
+import argparse
+import json
+from collections import defaultdict
+from pathlib import Path
+
+import pandas as pd
+import torch
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+
+from src.metrics import calculate_bleu
+from src.model import CaptionModel
+from src.transform import get_eval_transform
+from src.utils import load_config, load_vocab
+
+
+class ValidationImageDataset(Dataset):
+    """Images paired with their filenames so references can be looked up."""
+
+    def __init__(self, image_dir, image_names, transform):
+        self.image_dir = Path(image_dir)
+        self.image_names = image_names
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_names)
+
+    def __getitem__(self, index):
+        image_name = self.image_names[index]
+        image_path = self.image_dir / image_name
+        with Image.open(image_path) as image_file:
+            image = self.transform(image_file.convert("RGB"))
+        return image, image_name
+
+
+def load_model(config, config_dir, vocab, device):
+    """Create the caption model and load its saved weights."""
+    checkpoint_path = config_dir / config["paths"]["checkpoint"]
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    try:
+        checkpoint = torch.load(
+            checkpoint_path, map_location=device, weights_only=False
+        )
+    except TypeError:  # Compatibility with older PyTorch versions.
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # Use the architecture recorded with the weights if the config has since changed.
+    saved_config = checkpoint.get("model_config") or config["model"]
+    model = CaptionModel(
+        embed_size=saved_config["embed_size"],
+        hidden_size=saved_config["hidden_size"],
+        vocab_size=saved_config.get("vocab_size", len(vocab)),
+        num_layers=saved_config.get("num_layers", 1),
+        dropout=saved_config.get("dropout", 0.5),
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+    return model
+
+
+def load_references(caption_path, split_path):
+    with split_path.open("r", encoding="utf-8") as file:
+        split = json.load(file)
+    image_names = set(split)
+
+    captions = pd.read_csv(caption_path, sep="|")
+    captions.columns = captions.columns.str.strip()
+
+    references = defaultdict(list)
+    # Keep only nonempty references belonging to the requested validation split.
+    rows = captions[["image_name", "comment"]].dropna()
+    for row in rows.itertuples(index=False):
+        image_name = str(row.image_name).strip()
+        caption = str(row.comment).strip()
+        if image_name in image_names and caption:
+            references[image_name].append(caption)
+    return dict(references)
+
+
+@torch.inference_mode()
+def evaluate_model(
+    config_path="config.yaml",
+    method="beam",
+    beam_size=3,
+    batch_size=16,
+    num_workers=0,
+):
+    """Evaluate validation captions and return BLEU-1 through BLEU-4 scores."""
+    if method not in ("beam", "greedy"):
+        raise ValueError("method must be 'beam' or 'greedy'")
+    if beam_size < 1 or batch_size < 1:
+        raise ValueError("beam_size and batch_size must be positive")
+
+    config, config_dir = load_config(config_path)
+    paths = config["paths"]
+    vocab_path = config_dir / paths["vocab"]
+    split_path = config_dir / paths["val_json"]
+    caption_path = config_dir / paths["captions"]
+    image_dir = config_dir / paths["images"]
+    for path in (vocab_path, split_path, caption_path, image_dir):
+        if not path.exists():
+            raise FileNotFoundError(f"Required validation input not found: {path}")
+
+    vocab = load_vocab(vocab_path)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = load_model(config, config_dir, vocab, device)
+    references_by_image = load_references(caption_path, split_path)
+    image_names = sorted(references_by_image)
+    if not image_names:
+        raise ValueError("No validation images with reference captions were found")
+
+    dataset = ValidationImageDataset(
+        image_dir,
+        image_names,
+        get_eval_transform(config["data"]["image_size"]),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda"
+    )
+
+    references, hypotheses = [], []
+    max_len = config["data"].get("max_len", 30)
+    for images, batch_names in tqdm(loader, desc="Evaluating BLEU"):
+        predictions = model.generate_caption(
+            images.to(device),
+            vocab,
+            max_len=max_len,
+            method=method,
+            beam_size=beam_size
+        )
+        for image_name, prediction in zip(batch_names, predictions):
+            references.append([
+                vocab.tokenize(caption)
+                for caption in references_by_image[image_name]
+            ])
+            hypotheses.append(vocab.tokenize(" ".join(prediction)))
+
+    scores = calculate_bleu(references, hypotheses)
+    scores["num_images"] = len(hypotheses)
+    return scores
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Evaluate image captions with corpus BLEU scores."
+    )
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--method", choices=("beam", "greedy"), default="beam")
+    parser.add_argument("--beam-size", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--num-workers", type=int, default=0)
+    args = parser.parse_args()
+
+    scores = evaluate_model(
+        config_path=args.config,
+        method=args.method,
+        beam_size=args.beam_size,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+    )
+    print(f"Evaluated images: {scores.pop('num_images')}")
+    for name, score in scores.items():
+        print(f"{name}: {score:.4f}")
+
+
+if __name__ == "__main__":
+    main()
