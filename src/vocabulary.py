@@ -1,10 +1,12 @@
+"""Build and convert between caption tokens and model vocabulary IDs."""
+
 from collections import Counter
 import nltk
-import pickle
 
 class Vocabulary:
     def __init__(self, freq_threshold):
         self.freq_threshold = freq_threshold
+        # These IDs are shared with padding, loss masking, and decoding code.
         self.word2idx = {"<pad>" : 0, "<start>" : 1, "<end>" : 2, "<unk>" : 3}
         self.idx2word = {0 : "<pad>", 1 : "<start>", 2: "<end>", 3 : "<unk>"}
         self.idx = 4
@@ -34,17 +36,15 @@ class Vocabulary:
                 for token in tokenized_caption] + [self.word2idx["<end>"]]
 
     def denumericalize(self, ids):
-        ids = ids[1:(len(self) - 1)]
-        return [self.idx2word[id] for id in ids]
+        words = []
+        for idx in ids:
+            word = self.idx2word[idx]
+            if word == "<end>":
+                break
+            if word not in ("<start>", "<pad>"):
+                words.append(word)
+        return words
 
-    def save(self, vocab_dir):
-        with open(vocab_dir, "wb") as f:
-            pickle.dump(self, f)
-
-    @staticmethod
-    def load(vocab_dir):
-        with open(vocab_dir, "rb") as f:
-            return pickle.load(f)
 
 
 

@@ -1,5 +1,11 @@
+"""Shared persistence, configuration, and training utilities."""
+
 import os
+import json
+from pathlib import Path
+import pickle
 import torch
+import yaml
 
 def save_checkpoint(model, optimizer, epoch, val_loss, vocab, model_config, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -11,6 +17,7 @@ def save_checkpoint(model, optimizer, epoch, val_loss, vocab, model_config, path
         "vocab": vocab,
         "model_config": model_config,
     }, path)
+
 
 class EarlyStopping:
     def __init__(self, patience=5, min_delta=1e-4):
@@ -30,3 +37,67 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 self.should_stop = True
             return False  # không cải thiện
+
+
+def save_vocab(vocab):
+    config, config_dir = load_config()
+
+    vocab_path = config_dir / config["paths"]["vocab"]
+
+    with open(vocab_path, "wb") as f:
+        pickle.dump(vocab, f)
+    
+def load_vocab(vocab_path):
+    vocab_path = Path(vocab_path).expanduser()
+
+    if not Path(vocab_path).is_file():
+        raise FileNotFoundError(f"Vocab file not found: {vocab_path}")
+    
+    with open(vocab_path, "rb") as f:
+        return pickle.load(f)
+
+def save_splits(train, val, test):
+    config, config_dir = load_config()
+
+    train_path = config_dir / config["paths"]["train_json"]
+    val_path = config_dir / config["paths"]["val_json"]
+    test_path = config_dir / config["paths"]["test_json"]
+
+    with open(train_path, 'w') as f:
+        json.dump(train, f)
+    with open(val_path, 'w') as f:
+        json.dump(val, f)
+    with open(test_path, 'w') as f:
+        json.dump(test, f)
+
+def load_splits(train_path, val_path, test_path):
+    train_path = Path(train_path).expanduser()
+    val_path = Path(val_path).expanduser()
+    test_path = Path(test_path).expanduser()
+
+    if not train_path.is_file() or not val_path.is_file() or not test_path.is_file():
+        raise FileNotFoundError(f"One or more split files not found: {train_path}, {val_path}, {test_path}")
+    
+    with open(train_path, 'r') as f:
+        train = json.load(f)
+    with open(val_path, 'r') as f:
+        val = json.load(f)
+    with open(test_path, 'r') as f:
+        test = json.load(f)
+    return train, val, test
+
+def load_config(config_path=None):
+    """Load config, defaulting to the project-root file independent of cwd."""
+    if config_path is None:
+        config_path = Path(__file__).resolve().parent.parent / "config.yaml"
+    else:
+        # Explicit relative paths intentionally follow the caller's working directory.
+        config_path = Path(config_path).expanduser().resolve()
+
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Config file not found {config_path}")
+    
+    with config_path.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    return config, config_path.parent
+        

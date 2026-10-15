@@ -1,3 +1,5 @@
+"""Image encoder and caption decoder composed into one model."""
+
 import torch
 import torch.nn as nn
 
@@ -25,13 +27,14 @@ class CaptionModel(nn.Module):
         if method == "greedy":
             sampled_ids = self.decoder.sample(features, max_len=max_len)
             return [vocab.denumericalize(ids) for ids in sampled_ids]
-        # elif method == "beam":
-        #     from src.inference.beam_search import beam_search
-        #     captions = []
-        #     for i in range(features.size(0)):
-        #         ids = beam_search(
-        #             self.decoder, features[i:i + 1], vocab,
-        #             beam_size=beam_size, max_len=max_len,
-        #         )
-        #         captions.append(vocab.denumericalize(ids))
-        #     return captions
+        if method == "beam":
+            # Import lazily so greedy decoding does not load beam-search helpers.
+            from src.beam_search import beam_search
+            return [
+                vocab.denumericalize([vocab.word2idx["<start>"]] + beam_search(
+                    self.decoder, features[i:i + 1], vocab,
+                    beam_size=beam_size, max_len=max_len,
+                ))
+                for i in range(features.size(0))
+            ]
+        raise ValueError("method must be 'beam' or 'greedy'")

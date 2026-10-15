@@ -1,3 +1,5 @@
+"""LSTM caption decoder with packed training and autoregressive sampling."""
+
 import torch
 from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence
@@ -17,6 +19,7 @@ class Decoder(nn.Module):
         self.fc = nn.Linear(hidden_size, vocab_size)
     def forward(self, features, captions, lengths):
         embeddings = self.embed(captions)
+        # The image feature predicts the first caption token; caption tokens feed later steps.
         inputs = torch.cat((features.unsqueeze(1), embeddings), dim=1)
 
         packed = pack_padded_sequence(
@@ -42,7 +45,7 @@ class Decoder(nn.Module):
             for i in range(batch_size):
                 if not finished[i]:
                     sampled_ids[i].append(predicted[i].item())
-                    if predicted[i].item() == 2:  # end_idx
+                    if predicted[i].item() == 2:  # Stop adding words after the end token.
                         finished[i] = True
             if finished.all():
                 break

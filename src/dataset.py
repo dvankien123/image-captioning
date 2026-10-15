@@ -1,3 +1,5 @@
+"""Flickr30k caption dataset and variable-length batch collation."""
+
 import os
 import json
 import pandas as pd
@@ -21,6 +23,7 @@ class Flickr30kDataset(Dataset):
         with open(self.json_dir, "r") as f:
             data = json.load(f)
 
+        # Each image may have several captions; retain every caption for split images.
         df = df[df["image_name"].isin(data)]
         df = df.dropna(subset=['comment'])
         self.samples = df[["image_name", "comment"]].to_numpy().tolist()

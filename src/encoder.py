@@ -1,3 +1,5 @@
+"""ResNet image encoder with a trainable projection into caption space."""
+
 import torch
 from torch import nn
 from torchvision import models
@@ -18,6 +20,7 @@ class Encoder(nn.Module):
 
     def forward(self, images):
         if self.training and not any(param.requires_grad for param in self.backbone[-2].parameters()):
+            # Avoid building a gradient graph while all backbone weights are frozen.
             with torch.no_grad():
                 features = self.backbone(images)
         else:
