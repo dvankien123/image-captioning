@@ -17,5 +17,8 @@ checkpoints/*
 !checkpoints/.gitkeep
 
 .idea/
-notebooks/.ipynb_checkpoints/
-
+.vscode/
+notebooks/
+.codex/
+AGENTS.md
+__pycache__/
