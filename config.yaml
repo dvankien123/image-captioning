@@ -3,6 +3,7 @@ paths:
   captions: data/raw/flickr30k_images/results.csv
   train_json: data/splits/train.json
   val_json: data/splits/val.json
+  test_json: data/splits/test.json
   vocab: data/processed/vocab.pickle
   checkpoint: checkpoints/best_model.pth
 data:
@@ -12,7 +13,7 @@ data:
 model:
   embed_size: 256            # chiều embedding (ảnh & từ dùng chung)
   hidden_size: 512           # chiều hidden state của LSTM
-  num_layers: 1               # số lớp LSTM xếp chồng
+  num_layers: 2               # số lớp LSTM xếp chồng
   dropout: 0.5
   train_backbone: false
 train:
