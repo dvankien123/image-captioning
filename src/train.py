@@ -83,14 +83,12 @@ def main(config_path="config.yaml"):
 
     train_set = Flickr30kDataset(
         image_dir=config_dir / config["paths"]["images"],
-        caption_dir=config_dir / config["paths"]["captions"],
         json_dir=config_dir / config["paths"]["train_json"],
         vocab=vocab,
         transform=get_train_transform(config["data"]["image_size"]),
     )
     val_set = Flickr30kDataset(
         image_dir=config_dir / config["paths"]["images"],
-        caption_dir=config_dir / config["paths"]["captions"],
         json_dir=config_dir / config["paths"]["val_json"],
         vocab=vocab,
         transform=get_eval_transform(config["data"]["image_size"]),

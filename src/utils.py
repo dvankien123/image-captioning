@@ -4,10 +4,11 @@ import os
 import json
 from pathlib import Path
 import pickle
-import torch
 import yaml
 
 def save_checkpoint(model, optimizer, epoch, val_loss, vocab, model_config, path):
+    import torch
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save({
         "model_state_dict": model.state_dict(),
@@ -63,28 +64,25 @@ def save_splits(train, val, test):
     val_path = config_dir / config["paths"]["val_json"]
     test_path = config_dir / config["paths"]["test_json"]
 
-    with open(train_path, 'w') as f:
+    for path in (train_path, val_path, test_path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(train_path, 'w', encoding='utf-8') as f:
         json.dump(train, f)
-    with open(val_path, 'w') as f:
+    with open(val_path, 'w', encoding='utf-8') as f:
         json.dump(val, f)
-    with open(test_path, 'w') as f:
+    with open(test_path, 'w', encoding='utf-8') as f:
         json.dump(test, f)
 
-def load_splits(train_path, val_path, test_path):
-    train_path = Path(train_path).expanduser()
-    val_path = Path(val_path).expanduser()
-    test_path = Path(test_path).expanduser()
+def load_splits(data_path):
+    data_path = Path(data_path).expanduser()
 
-    if not train_path.is_file() or not val_path.is_file() or not test_path.is_file():
-        raise FileNotFoundError(f"One or more split files not found: {train_path}, {val_path}, {test_path}")
+    if not data_path.is_file():
+        raise FileNotFoundError(f"One or more split files not found: {data_path}")
     
-    with open(train_path, 'r') as f:
-        train = json.load(f)
-    with open(val_path, 'r') as f:
-        val = json.load(f)
-    with open(test_path, 'r') as f:
-        test = json.load(f)
-    return train, val, test
+    with open(data_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    return data
 
 def load_config(config_path=None):
     """Load config, defaulting to the project-root file independent of cwd."""

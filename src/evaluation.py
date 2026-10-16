@@ -1,11 +1,8 @@
 """Evaluate generated validation captions with corpus BLEU scores."""
 
 import argparse
-import json
-from collections import defaultdict
 from pathlib import Path
 
-import pandas as pd
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
@@ -14,7 +11,7 @@ from tqdm import tqdm
 from src.metrics import calculate_bleu
 from src.model import CaptionModel
 from src.transform import get_eval_transform
-from src.utils import load_config, load_vocab
+from src.utils import load_config, load_splits, load_vocab
 
 
 class ValidationImageDataset(Dataset):
@@ -62,23 +59,26 @@ def load_model(config, config_dir, vocab, device):
     return model
 
 
-def load_references(caption_path, split_path):
-    with split_path.open("r", encoding="utf-8") as file:
-        split = json.load(file)
-    image_names = set(split)
+def load_references(split_path):
+    """Load image reference captions from a filename-to-captions split file."""
+    split = load_splits(split_path)
+    if not isinstance(split, dict):
+        raise ValueError(f"Split file must contain a filename-to-captions object: {split_path}")
 
-    captions = pd.read_csv(caption_path, sep="|")
-    captions.columns = captions.columns.str.strip()
-
-    references = defaultdict(list)
-    # Keep only nonempty references belonging to the requested validation split.
-    rows = captions[["image_name", "comment"]].dropna()
-    for row in rows.itertuples(index=False):
-        image_name = str(row.image_name).strip()
-        caption = str(row.comment).strip()
-        if image_name in image_names and caption:
-            references[image_name].append(caption)
-    return dict(references)
+    references = {}
+    for image_name, captions in split.items():
+        if isinstance(captions, str):
+            captions = [captions]
+        if not isinstance(captions, list):
+            raise ValueError(f"Captions for {image_name!r} must be a string or list")
+        clean_captions = [
+            caption.strip()
+            for caption in captions
+            if isinstance(caption, str) and caption.strip()
+        ]
+        if clean_captions:
+            references[str(image_name).strip()] = clean_captions
+    return references
 
 
 @torch.inference_mode()
@@ -99,16 +99,15 @@ def evaluate_model(
     paths = config["paths"]
     vocab_path = config_dir / paths["vocab"]
     split_path = config_dir / paths["val_json"]
-    caption_path = config_dir / paths["captions"]
     image_dir = config_dir / paths["images"]
-    for path in (vocab_path, split_path, caption_path, image_dir):
+    for path in (vocab_path, split_path, image_dir):
         if not path.exists():
             raise FileNotFoundError(f"Required validation input not found: {path}")
 
     vocab = load_vocab(vocab_path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_model(config, config_dir, vocab, device)
-    references_by_image = load_references(caption_path, split_path)
+    references_by_image = load_references(split_path)
     image_names = sorted(references_by_image)
     if not image_names:
         raise ValueError("No validation images with reference captions were found")
