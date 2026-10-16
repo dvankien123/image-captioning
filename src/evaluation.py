@@ -1,4 +1,4 @@
-"""Evaluate generated validation captions with corpus BLEU scores."""
+"""Evaluate generated validation captions with corpus metrics."""
 
 import argparse
 from pathlib import Path
@@ -8,7 +8,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from src.metrics import calculate_bleu
+from src.metrics import calculate_caption_metrics
 from src.model import CaptionModel
 from src.transform import get_eval_transform
 from src.utils import load_config, load_splits, load_vocab
@@ -89,7 +89,7 @@ def evaluate_model(
     batch_size=16,
     num_workers=0,
 ):
-    """Evaluate validation captions and return BLEU-1 through BLEU-4 scores."""
+    """Evaluate validation captions with corpus-level caption metrics."""
     if method not in ("beam", "greedy"):
         raise ValueError("method must be 'beam' or 'greedy'")
     if beam_size < 1 or batch_size < 1:
@@ -127,7 +127,7 @@ def evaluate_model(
 
     references, hypotheses = [], []
     max_len = config["data"].get("max_len", 30)
-    for images, batch_names in tqdm(loader, desc="Evaluating BLEU"):
+    for images, batch_names in tqdm(loader, desc="Evaluating captions"):
         predictions = model.generate_caption(
             images.to(device),
             vocab,
@@ -142,14 +142,14 @@ def evaluate_model(
             ])
             hypotheses.append(vocab.tokenize(" ".join(prediction)))
 
-    scores = calculate_bleu(references, hypotheses)
+    scores = calculate_caption_metrics(references, hypotheses)
     scores["num_images"] = len(hypotheses)
     return scores
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate image captions with corpus BLEU scores."
+        description="Evaluate image captions with corpus-level caption metrics."
     )
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--method", choices=("beam", "greedy"), default="beam")
