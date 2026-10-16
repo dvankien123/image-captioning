@@ -1,34 +1,32 @@
 """Flickr30k caption dataset and variable-length batch collation."""
 
-import os
+from pathlib import Path
+import pandas as pd
 import torch
+
+from src.utils import load_splits
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 from PIL import Image
-from src.utils import load_splits
 
 class Flickr30kDataset(Dataset):
-    def __init__(self, image_dir, json_dir, vocab, transform, caption_dir=None):
+    def __init__(self, image_dir, caption_dir,
+                 json_dir, vocab, transform):
         self.image_dir = image_dir
+        self.caption_dir = caption_dir
         self.json_dir = json_dir
         self.vocab = vocab
         self.transform = transform
 
-        split = load_splits(self.json_dir)
-        if not isinstance(split, dict):
-            raise ValueError(f"Split file must contain a filename-to-captions object: {self.json_dir}")
+        df = pd.read_csv(self.caption_dir, sep = '|')
+        df.columns = df.columns.str.strip()
 
-        self.samples = []
-        for image_name, captions in split.items():
-            if isinstance(captions, str):
-                captions = [captions]
-            if not isinstance(captions, list):
-                raise ValueError(f"Captions for {image_name!r} must be a string or list")
-            self.samples.extend(
-                (image_name, caption.strip())
-                for caption in captions
-                if isinstance(caption, str) and caption.strip()
-            )
+        data = load_splits(self.json_dir)
+
+        # Each image may have several captions; retain every caption for split images.
+        df = df[df["image_name"].isin(data)]
+        df = df.dropna(subset=['comment'])
+        self.samples = df[["image_name", "comment"]].to_numpy().tolist()
 
     def __len__(self):
         return len(self.samples)
@@ -36,7 +34,7 @@ class Flickr30kDataset(Dataset):
     def __getitem__(self, idx):
         image_name, caption = self.samples[idx]
 
-        image_path = os.path.join(self.image_dir, image_name)
+        image_path = Path(self.image_dir) / image_name
         image = Image.open(image_path).convert("RGB")
         image = self.transform(image)
 
