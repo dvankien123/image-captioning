@@ -1,55 +1,102 @@
-"""BLEU metric helpers for image-captioning evaluation."""
+"""COCO caption metric helpers for image-captioning evaluation."""
 
-from nltk.translate.bleu_score import SmoothingFunction, corpus_bleu, sentence_bleu
+from pycocoevalcap.bleu.bleu import Bleu
+from pycocoevalcap.cider.cider import Cider
+from pycocoevalcap.meteor.meteor import Meteor
+from pycocoevalcap.rouge.rouge import Rouge
+
+
+def _prepare_coco_inputs(references, hypotheses):
+    """Validate tokenized corpus inputs and format them for COCO scorers."""
+    if not references or not hypotheses:
+        raise ValueError("references and hypotheses must not be empty")
+    if len(references) != len(hypotheses):
+        raise ValueError("references and hypotheses must have the same length")
+
+    gts, res = {}, {}
+    for index, (image_references, hypothesis) in enumerate(
+        zip(references, hypotheses)
+    ):
+        if not image_references:
+            raise ValueError("each hypothesis must have at least one reference caption")
+        if isinstance(hypothesis, str) or not isinstance(hypothesis, (list, tuple)):
+            raise TypeError("each hypothesis must be a token sequence")
+        if any(not isinstance(token, str) for token in hypothesis):
+            raise TypeError("hypothesis tokens must be strings")
+
+        reference_texts = []
+        for reference in image_references:
+            if isinstance(reference, str) or not isinstance(reference, (list, tuple)):
+                raise TypeError("each reference caption must be a token sequence")
+            if any(not isinstance(token, str) for token in reference):
+                raise TypeError("reference tokens must be strings")
+            reference_texts.append(" ".join(reference))
+
+        image_id = str(index)
+        gts[image_id] = reference_texts
+        res[image_id] = [" ".join(hypothesis)]
+
+    return gts, res
+
+
+def _score(references, hypotheses, scorer):
+    gts, res = _prepare_coco_inputs(references, hypotheses)
+    score, _ = scorer.compute_score(gts, res)
+    return score
 
 
 def calculate_bleu(references, hypotheses):
-    """Calculate BLEU-1 through BLEU-4 based on input dimensions.
+    """Calculate corpus BLEU-1 through BLEU-4 using the COCO toolkit.
 
-    Sentence input has 2D references (multiple tokenized references) and 1D
-    hypotheses (one tokenized caption). Corpus input has 3D references (one
-    group of tokenized references per image) and 2D hypotheses.
+    ``references`` contains tokenized captions grouped by image, while
+    ``hypotheses`` contains one tokenized caption per image.
     """
-    if not references or not hypotheses:
-        raise ValueError("references and hypotheses must not be empty")
+    gts, res = _prepare_coco_inputs(references, hypotheses)
+    scores, _ = Bleu(4).compute_score(gts, res, verbose=0)
+    return {
+        f"bleu{index + 1}": float(score)
+        for index, score in enumerate(scores)
+    }
 
-    first_reference = references[0]
-    first_hypothesis = hypotheses[0]
-    sentence_input = (
-        isinstance(first_reference, (list, tuple))
-        and isinstance(first_hypothesis, str)
-    )
-    corpus_input = (
-        isinstance(first_reference, (list, tuple))
-        and bool(first_reference)
-        and isinstance(first_reference[0], (list, tuple))
-        and isinstance(first_hypothesis, (list, tuple))
-    )
-    if not sentence_input and not corpus_input:
-        raise ValueError(
-            "expected sentence input (2D references, 1D hypotheses) or "
-            "corpus input (3D references, 2D hypotheses)"
-        )
 
-    if corpus_input:
-        if len(references) != len(hypotheses):
-            raise ValueError("references and hypotheses must have the same length")
-        if any(not image_references for image_references in references):
-            raise ValueError("each hypothesis must have at least one reference caption")
-        bleu_function = corpus_bleu
-    else:
-        if not first_reference:
-            raise ValueError("references must contain at least one reference caption")
-        bleu_function = sentence_bleu
+def calculate_meteor(references, hypotheses):
+    """Calculate corpus METEOR using the COCO toolkit."""
+    scorer = Meteor()
+    try:
+        score = _score(references, hypotheses, scorer)
+        return float(score)
+    finally:
+        # The toolkit owns a Java subprocess and closes it from its destructor.
+        del scorer
 
-    smoothing = SmoothingFunction().method4
-    scores = {}
-    for n in range(1, 5):
-        weights = (1.0 / n,) * n + (0.0,) * (4 - n)
-        scores[f"bleu{n}"] = bleu_function(
-            references,
-            hypotheses,
-            weights=weights,
-            smoothing_function=smoothing,
-        )
+
+def calculate_rouge(references, hypotheses):
+    """Calculate corpus ROUGE-L using the COCO toolkit."""
+    return float(_score(references, hypotheses, Rouge()))
+
+
+def calculate_cider(references, hypotheses):
+    """Calculate corpus CIDEr using the COCO toolkit."""
+    return float(_score(references, hypotheses, Cider()))
+
+
+def calculate_caption_metrics(references, hypotheses):
+    """Calculate all supported corpus metrics for one aligned image batch."""
+    gts, res = _prepare_coco_inputs(references, hypotheses)
+    bleu_scores, _ = Bleu(4).compute_score(gts, res, verbose=0)
+    meteor = Meteor()
+    try:
+        meteor_score, _ = meteor.compute_score(gts, res)
+    finally:
+        del meteor
+    rouge_score, _ = Rouge().compute_score(gts, res)
+    cider_score, _ = Cider().compute_score(gts, res)
+
+    scores = {
+        f"bleu{index + 1}": float(score)
+        for index, score in enumerate(bleu_scores)
+    }
+    scores["meteor"] = float(meteor_score)
+    scores["rouge_l"] = float(rouge_score)
+    scores["cider"] = float(cider_score)
     return scores
