@@ -6,13 +6,8 @@ from pycocoevalcap.meteor.meteor import Meteor
 from pycocoevalcap.rouge.rouge import Rouge
 
 
-def _prepare_coco_inputs(references, hypotheses):
+def prepare_coco_inputs(references, hypotheses):
     """Validate tokenized corpus inputs and format them for COCO scorers."""
-    if not references or not hypotheses:
-        raise ValueError("references and hypotheses must not be empty")
-    if len(references) != len(hypotheses):
-        raise ValueError("references and hypotheses must have the same length")
-
     gts, res = {}, {}
     for index, (image_references, hypothesis) in enumerate(
         zip(references, hypotheses)
@@ -39,8 +34,8 @@ def _prepare_coco_inputs(references, hypotheses):
     return gts, res
 
 
-def _score(references, hypotheses, scorer):
-    gts, res = _prepare_coco_inputs(references, hypotheses)
+def score(references, hypotheses, scorer):
+    gts, res = prepare_coco_inputs(references, hypotheses)
     score, _ = scorer.compute_score(gts, res)
     return score
 
@@ -51,7 +46,7 @@ def calculate_bleu(references, hypotheses):
     ``references`` contains tokenized captions grouped by image, while
     ``hypotheses`` contains one tokenized caption per image.
     """
-    gts, res = _prepare_coco_inputs(references, hypotheses)
+    gts, res = prepare_coco_inputs(references, hypotheses)
     scores, _ = Bleu(4).compute_score(gts, res, verbose=0)
     return {
         f"bleu{index + 1}": float(score)
@@ -63,7 +58,7 @@ def calculate_meteor(references, hypotheses):
     """Calculate corpus METEOR using the COCO toolkit."""
     scorer = Meteor()
     try:
-        score = _score(references, hypotheses, scorer)
+        score = score(references, hypotheses, scorer)
         return float(score)
     finally:
         # The toolkit owns a Java subprocess and closes it from its destructor.
@@ -72,17 +67,17 @@ def calculate_meteor(references, hypotheses):
 
 def calculate_rouge(references, hypotheses):
     """Calculate corpus ROUGE-L using the COCO toolkit."""
-    return float(_score(references, hypotheses, Rouge()))
+    return float(score(references, hypotheses, Rouge()))
 
 
 def calculate_cider(references, hypotheses):
     """Calculate corpus CIDEr using the COCO toolkit."""
-    return float(_score(references, hypotheses, Cider()))
+    return float(score(references, hypotheses, Cider()))
 
 
 def calculate_caption_metrics(references, hypotheses):
     """Calculate all supported corpus metrics for one aligned image batch."""
-    gts, res = _prepare_coco_inputs(references, hypotheses)
+    gts, res = prepare_coco_inputs(references, hypotheses)
     bleu_scores, _ = Bleu(4).compute_score(gts, res, verbose=0)
     meteor = Meteor()
     try:
