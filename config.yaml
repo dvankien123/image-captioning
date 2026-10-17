@@ -27,3 +27,8 @@ train:
   early_stopping_patience: 5
   lr_scheduler_patience: 2
   lr_scheduler_factor: 0.5
+evaluation:
+  method: greedy
+  beam_size: 3
+  batch_size: 16
+  num_workers: 2
