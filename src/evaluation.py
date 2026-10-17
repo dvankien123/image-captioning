@@ -1,6 +1,5 @@
 """Evaluate generated validation captions with corpus metrics."""
 
-import argparse
 from pathlib import Path
 
 import torch
@@ -148,22 +147,14 @@ def evaluate_model(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Evaluate image captions with corpus-level caption metrics."
-    )
-    parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--method", choices=("beam", "greedy"), default="beam")
-    parser.add_argument("--beam-size", type=int, default=3)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--num-workers", type=int, default=0)
-    args = parser.parse_args()
+    config, config_dir = load_config()
 
     scores = evaluate_model(
-        config_path=args.config,
-        method=args.method,
-        beam_size=args.beam_size,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
+        config_path=config_dir / "config.yaml",
+        method=config["evaluation"].get("method", "beam"),
+        beam_size=config["evaluation"].get("beam_size", 3),
+        batch_size=config["evaluation"].get("batch_size", 16),
+        num_workers=config["evaluation"].get("num_workers", 0),
     )
     print(f"Evaluated images: {scores.pop('num_images')}")
     for name, score in scores.items():
