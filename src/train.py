@@ -72,8 +72,7 @@ def validate(model, loader, criterion, device):
 
     return total_loss / total_tokens
 
-def main(config_path="config.yaml"):
-    config, config_dir = load_config(config_path)
+def main(config, config_dir):
     torch.manual_seed(config["train"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")

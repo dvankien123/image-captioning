@@ -7,9 +7,7 @@ from src.utils import load_vocab, load_config
 from src.transform import get_eval_transform
 from src.model import CaptionModel
 
-def load_model(config_path="config.yaml"):
-    config, config_dir = load_config(config_path)
-
+def load_model(config, config_dir):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     vocab = load_vocab(config_dir / config["paths"]["vocab"])

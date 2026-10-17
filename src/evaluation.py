@@ -146,9 +146,7 @@ def evaluate_model(
     return scores
 
 
-def main():
-    config, config_dir = load_config()
-
+def main(config, config_dir):
     scores = evaluate_model(
         config_path=config_dir / "config.yaml",
         method=config["evaluation"].get("method", "beam"),
