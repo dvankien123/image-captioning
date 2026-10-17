@@ -1,7 +1,6 @@
 """Flickr30k caption dataset and variable-length batch collation."""
 
 from pathlib import Path
-import pandas as pd
 import torch
 
 from src.utils import load_splits
@@ -10,23 +9,19 @@ from torch.nn.utils.rnn import pad_sequence
 from PIL import Image
 
 class Flickr30kDataset(Dataset):
-    def __init__(self, image_dir, caption_dir,
-                 json_dir, vocab, transform):
-        self.image_dir = image_dir
-        self.caption_dir = caption_dir
-        self.json_dir = json_dir
+    def __init__(self, image_path, split_path, vocab, transform):
+        self.image_path = Path(image_path)
+        self.split_path = Path(split_path)
         self.vocab = vocab
         self.transform = transform
 
-        df = pd.read_csv(self.caption_dir, sep = '|')
-        df.columns = df.columns.str.strip()
-
-        data = load_splits(self.json_dir)
+        data = load_splits(self.split_path)
 
         # Each image may have several captions; retain every caption for split images.
-        df = df[df["image_name"].isin(data)]
-        df = df.dropna(subset=['comment'])
-        self.samples = df[["image_name", "comment"]].to_numpy().tolist()
+        self.samples = []
+        for image_name, captions in data.items():
+            for caption in captions:
+                self.samples.append((image_name, caption))
 
     def __len__(self):
         return len(self.samples)
@@ -34,7 +29,7 @@ class Flickr30kDataset(Dataset):
     def __getitem__(self, idx):
         image_name, caption = self.samples[idx]
 
-        image_path = Path(self.image_dir) / image_name
+        image_path = self.image_path / image_name
         image = Image.open(image_path).convert("RGB")
         image = self.transform(image)
 
