@@ -1,4 +1,23 @@
-data/raw/
+data/*
+!data/.gitkeep
+!data/processed/
+!data/raw/
+!data/splits/
+
+data/processed/*
+!data/processed/.gitkeep
+
+data/raw/*
+!data/raw/.gitkeep
+
+data/splits/*
+!data/splits/.gitkeep
+
+checkpoints/*
+!checkpoints/.gitkeep
 
 .idea/
-.ipynb_checkpoints/
+.vscode/
+.codex/
+AGENTS.md
+__pycache__/
