@@ -1,0 +1,51 @@
+# Evaluation Results
+
+Evaluation performed on the Flickr30k validation set (1,014 images, 5 reference captions per image).
+
+---
+
+## 1. Summary Comparison
+
+| Optimization Round | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 | METEOR | ROUGE-L | CIDEr |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Greedy Search** | 0.6163 | 0.4118 | 0.2771 | 0.1903 | 0.1931 | 0.4775 | 0.3701 |
+| **Beam Search** (`beam_size=3`) | **0.6563** | **0.4499** | **0.3139** | **0.2210** | **0.1969** | **0.4913** | **0.4263** |
+
+> *Note on Beam Search*: With GNMT length penalty (`alpha=1.0`), METEOR increased to 0.1989. (Without length penalty: BLEU-1: 0.6608, BLEU-4: 0.2204, METEOR: 0.1959, ROUGE-L: 0.4917, CIDEr: 0.4201).
+
+---
+
+## 2. Evaluation Details
+
+### Round 1: Greedy Search
+- **Decoding Method**: `greedy`
+- **Evaluated Images**: 1014
+- **Parameters**:
+  - `max_len`: 30
+  - `batch_size`: 16
+- **Metrics**:
+  - `bleu1`: 0.6163
+  - `bleu2`: 0.4118
+  - `bleu3`: 0.2771
+  - `bleu4`: 0.1903
+  - `meteor`: 0.1931
+  - `rouge_l`: 0.4775
+  - `cider`: 0.3701
+
+### Round 2: Beam Search
+- **Decoding Method**: `beam`
+- **Evaluated Images**: 1014
+- **Parameters**:
+  - `beam_size`: 3
+  - `length_penalty_alpha`: 0.6
+  - `max_len`: 30
+  - `batch_size`: 16
+- **Metrics**:
+  - `bleu1`: 0.6563
+  - `bleu2`: 0.4499
+  - `bleu3`: 0.3139
+  - `bleu4`: 0.2210
+  - `meteor`: 0.1969
+  - `rouge_l`: 0.4913
+  - `cider`: 0.4263
+
