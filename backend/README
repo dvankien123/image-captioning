@@ -1,0 +1,5 @@
+# Backend
+
+See the repository README for installation, configuration, API endpoints, and run instructions. Install runtime dependencies from the repository root with:
+
+    pip install -r backend/requirements.txt

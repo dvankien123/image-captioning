@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+SQLAlchemy
+pydantic-settings
+Pillow
+torch
+torchvision
+nltk
+PyYAML
