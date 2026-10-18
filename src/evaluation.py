@@ -1,6 +1,7 @@
 """Evaluate generated validation captions with corpus metrics."""
 
 from pathlib import Path
+from statistics import mean, median
 
 import torch
 from PIL import Image
@@ -85,6 +86,7 @@ def evaluate_model(
     config_path="config.yaml",
     method="beam",
     beam_size=3,
+    length_penalty_alpha=0.6,
     batch_size=16,
     num_workers=0,
 ):
@@ -93,6 +95,8 @@ def evaluate_model(
         raise ValueError("method must be 'beam' or 'greedy'")
     if beam_size < 1 or batch_size < 1:
         raise ValueError("beam_size and batch_size must be positive")
+    if length_penalty_alpha < 0:
+        raise ValueError("length_penalty_alpha must be non-negative")
 
     config, config_dir = load_config(config_path)
     paths = config["paths"]
@@ -132,7 +136,8 @@ def evaluate_model(
             vocab,
             max_len=max_len,
             method=method,
-            beam_size=beam_size
+            beam_size=beam_size,
+            length_penalty_alpha=length_penalty_alpha,
         )
         for image_name, prediction in zip(batch_names, predictions):
             references.append([
@@ -143,6 +148,11 @@ def evaluate_model(
 
     scores = calculate_caption_metrics(references, hypotheses)
     scores["num_images"] = len(hypotheses)
+    caption_lengths = [len(hypothesis) for hypothesis in hypotheses]
+    scores["caption_length_mean"] = float(mean(caption_lengths))
+    scores["caption_length_median"] = float(median(caption_lengths))
+    scores["caption_length_min"] = float(min(caption_lengths))
+    scores["caption_length_max"] = float(max(caption_lengths))
     return scores
 
 
@@ -151,6 +161,7 @@ def main(config, config_dir):
         config_path=config_dir / "config.yaml",
         method=config["evaluation"].get("method", "beam"),
         beam_size=config["evaluation"].get("beam_size", 3),
+        length_penalty_alpha=config["evaluation"].get("length_penalty_alpha", 0.6),
         batch_size=config["evaluation"].get("batch_size", 16),
         num_workers=config["evaluation"].get("num_workers", 0),
     )
@@ -160,4 +171,5 @@ def main(config, config_dir):
 
 
 if __name__ == "__main__":
-    main()
+    config, config_dir = load_config()
+    main(config, config_dir)
