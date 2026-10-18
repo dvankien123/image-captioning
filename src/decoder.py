@@ -35,12 +35,18 @@ class Decoder(nn.Module):
         sampled_ids = [[] for _ in range(batch_size)]
         finished = torch.zeros(batch_size, dtype=torch.bool, device=features.device)
 
-        inputs = features.unsqueeze(1)
-        states = None
+        # Match beam search: the image step predicts <start>, then <start> is
+        # used as context for the first caption token.
+        _, states = self.lstm(features.unsqueeze(1))
+        start_ids = torch.full((batch_size,), 1, dtype=torch.long, device=features.device)
+        inputs = self.embed(start_ids).unsqueeze(1)
 
         for _ in range(max_len):
             hiddens, states = self.lstm(inputs, states)
             outputs = self.fc(hiddens.squeeze(1))
+            outputs = outputs.clone()
+            outputs[:, 0] = float("-inf")  # <pad> cannot appear in caption content.
+            outputs[:, 1] = float("-inf")  # Do not emit <start> after the seed.
             predicted = outputs.argmax(dim=1)
             for i in range(batch_size):
                 if not finished[i]:
