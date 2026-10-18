@@ -4,7 +4,7 @@ import uuid
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy.orm import Session
@@ -50,6 +50,7 @@ def _validate_image(content: bytes, content_type: str) -> None:
 async def upload_image(
     request: Request,
     file: UploadFile = File(...),
+    show_attention: bool = Form(default=False),
 ):
     started_at = time.perf_counter()
 
@@ -94,11 +95,21 @@ async def upload_image(
             ) from exc
 
         try:
+            predictor = (
+                caption_model_service.predict_with_attention
+                if show_attention
+                else caption_model_service.predict
+            )
             inference = asyncio.create_task(
-                run_in_threadpool(caption_model_service.predict, str(file_path))
+                run_in_threadpool(predictor, str(file_path))
             )
             try:
-                caption = await asyncio.shield(inference)
+                prediction = await asyncio.shield(inference)
+                if show_attention:
+                    caption, attention_steps = prediction
+                else:
+                    caption = prediction
+                    attention_steps = None
             except asyncio.CancelledError:
                 try:
                     await inference
@@ -121,6 +132,11 @@ async def upload_image(
             _safe_filename(file.filename),
             caption,
         )
+        if show_attention:
+            result["attention"] = {
+                "method": "gradcam",
+                "steps": attention_steps,
+            }
         logger.info(
             "Captioned upload %s in %.2f seconds",
             result["id"],

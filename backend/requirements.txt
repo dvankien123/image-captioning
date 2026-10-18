@@ -4,7 +4,8 @@ python-multipart
 SQLAlchemy
 pydantic-settings
 Pillow
-torch
-torchvision
+numpy
+torch==2.13.0
+torchvision==0.28.0
 nltk
 PyYAML

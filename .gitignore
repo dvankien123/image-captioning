@@ -1,5 +1,11 @@
 # Ignore thư mục môi trường ảo
 venv/
+.venv/
+
+# Keep datasets, IDE state, and notebook checkpoints out of Git
+data/raw/
+.idea/
+.ipynb_checkpoints/
 
 # Ignore thư mục lưu ảnh upload
 temp_uploads/

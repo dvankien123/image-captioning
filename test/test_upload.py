@@ -1,48 +1,55 @@
-import os
+from io import BytesIO
+
 import pytest
 from fastapi.testclient import TestClient
-from backend.main import app
+from PIL import Image
+from sqlalchemy import create_engine
 
-# Khởi tạo TestClient của FastAPI
-client = TestClient(app)
+import backend.main as main
+from backend.core.database import SessionLocal, engine as database_engine
+from backend.services.model_service import caption_model_service
 
-def test_upload_valid_image():
-    """Kịch bản 1: Tải lên một file ảnh PNG hợp lệ."""
-    
-    # 1. Tạo một ảnh giả (chỉ chứa một vài byte dữ liệu để giả lập)
-    file_content = b"fake image content"
-    files = {
-        "file": ("test_image.png", file_content, "image/png")
-    }
 
-    # 2. Bắn request POST lên API /api/upload
-    response = client.post("/api/upload", files=files)
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    test_engine = create_engine(
+        f"sqlite:///{(tmp_path / 'captions.db').as_posix()}",
+        connect_args={"check_same_thread": False},
+    )
+    monkeypatch.setattr(main, "engine", test_engine)
+    SessionLocal.configure(bind=test_engine)
+    monkeypatch.setattr(caption_model_service, "load", lambda: None)
+    monkeypatch.setattr(caption_model_service, "predict", lambda _path: "a test caption")
 
-    # 3. Kiểm tra kết quả
-    assert response.status_code == 200 # Phải trả về mã 200 (Thành công)
-    
-    # Lấy dữ liệu JSON trả về
+    try:
+        with TestClient(main.app) as test_client:
+            yield test_client
+    finally:
+        SessionLocal.configure(bind=database_engine)
+        test_engine.dispose()
+
+
+def test_upload_valid_image(client):
+    image = BytesIO()
+    Image.new("RGB", (32, 32), color=(80, 120, 160)).save(image, format="PNG")
+
+    response = client.post(
+        "/api/upload",
+        files={"file": ("test_image.png", image.getvalue(), "image/png")},
+    )
+
+    assert response.status_code == 200
     data = response.json()
-    
-    # Kiểm tra xem các trường dữ liệu có tồn tại không
     assert data["status"] == "success"
-    assert "data" in data
     assert data["data"]["original_filename"] == "test_image.png"
-    assert "caption" in data["data"]
+    assert data["data"]["caption"] == "a test caption"
 
-def test_upload_invalid_file_type():
-    """Kịch bản 2: Tải lên một file dạng Text, mong đợi API sẽ chặn lại."""
-    
-    file_content = b"This is a text file, not an image"
-    files = {
-        "file": ("document.txt", file_content, "text/plain")
-    }
 
-    response = client.post("/api/upload", files=files)
+def test_upload_invalid_file_type(client):
+    response = client.post(
+        "/api/upload",
+        files={"file": ("document.txt", b"This is a text file", "text/plain")},
+    )
 
-    # API phải chặn lại và trả về mã lỗi 400 (Bad Request)
-    assert response.status_code == 400 
-    
-    # Kiểm tra câu thông báo lỗi xem có khớp không
-    data = response.json()
-    assert data["detail"] == "Vui lòng upload ảnh JPG hoặc PNG."
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Vui lòng upload ảnh JPG hoặc PNG."
