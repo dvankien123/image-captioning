@@ -21,7 +21,8 @@ class CaptionModel(nn.Module):
 
     @torch.no_grad()
     def generate_caption(self, image, vocab, max_len=30,
-                         method="greedy", beam_size=3):
+                         method="greedy", beam_size=3,
+                         length_penalty_alpha=0.6):
         features = self.encoder(image)
 
         if method == "greedy":
@@ -34,6 +35,7 @@ class CaptionModel(nn.Module):
                 vocab.denumericalize([vocab.word2idx["<start>"]] + beam_search(
                     self.decoder, features[i:i + 1], vocab,
                     beam_size=beam_size, max_len=max_len,
+                    length_penalty_alpha=length_penalty_alpha,
                 ))
                 for i in range(features.size(0))
             ]
