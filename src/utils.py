@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import pickle
 import yaml
+import torch
 
 def save_checkpoint(model, optimizer, epoch, val_loss, vocab, model_config, path):
     import torch
@@ -98,4 +99,32 @@ def load_config(config_path=None):
     with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     return config, config_path.parent
-        
+
+
+def save_embedding_matrix(embedding_matrix, path=None):
+    """Save an embedding matrix tensor to disk."""
+    if path is None:
+        config, config_dir = load_config()
+        path = config_dir / config["paths"]["embedding_matrix"]
+    else:
+        path = Path(path).expanduser().resolve()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(embedding_matrix, path)
+
+
+def load_embedding_matrix(path=None):
+    """Load an embedding matrix tensor from disk."""
+    if path is None:
+        config, config_dir = load_config()
+        path = config_dir / config["paths"]["embedding_matrix"]
+    else:
+        path = Path(path).expanduser().resolve()
+
+    if not path.is_file():
+        raise FileNotFoundError(f"Embedding matrix file not found: {path}")
+
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
