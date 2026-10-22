@@ -51,7 +51,8 @@ def load_model(config, config_dir, vocab, device):
         embed_size=saved_config["embed_size"],
         hidden_size=saved_config["hidden_size"],
         vocab_size=saved_config.get("vocab_size", len(vocab)),
-        num_layers=saved_config.get("num_layers", 1),
+        attention_dim=saved_config.get("attention_dim", config["model"].get("attention_dim", 512)),
+        encoder_dim=saved_config.get("encoder_dim", config["model"].get("encoder_dim", 2048)),
         dropout=saved_config.get("dropout", 0.5),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -131,7 +132,7 @@ def evaluate_model(
     references, hypotheses = [], []
     max_len = config["data"].get("max_len", 30)
     for images, batch_names in tqdm(loader, desc="Evaluating captions"):
-        predictions = model.generate_caption(
+        predictions, _ = model.generate_caption(
             images.to(device),
             vocab,
             max_len=max_len,

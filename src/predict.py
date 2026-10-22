@@ -24,7 +24,8 @@ def load_model(config, config_dir):
         embed_size=saved_config["embed_size"],
         hidden_size=saved_config["hidden_size"],
         vocab_size=saved_config.get("vocab_size", len(vocab)),
-        num_layers=saved_config.get("num_layers", 1),
+        attention_dim=saved_config.get("attention_dim", config["model"].get("attention_dim", 512)),
+        encoder_dim=saved_config.get("encoder_dim", config["model"].get("encoder_dim", 2048)),
         dropout=saved_config.get("dropout", 0.5),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -43,11 +44,11 @@ def image_caption(image_input, model, vocab,
 
     image_tensor = transform(raw_image).unsqueeze(0).to(device)  # (1, 3, H, W)
     with torch.no_grad():
-        caption = model.generate_caption(
+        res, _ = model.generate_caption(
             image_tensor,
             vocab,
             max_len=maxlen,
             method=method,
             beam_size=beam_size,
-        )[0]
-    return caption
+        )
+    return res
