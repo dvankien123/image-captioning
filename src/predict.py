@@ -44,11 +44,11 @@ def image_caption(image_input, model, vocab,
 
     image_tensor = transform(raw_image).unsqueeze(0).to(device)  # (1, 3, H, W)
     with torch.no_grad():
-        res, _ = model.generate_caption(
+        res, alphas = model.generate_caption(
             image_tensor,
             vocab,
             max_len=maxlen,
             method=method,
             beam_size=beam_size,
         )
-    return res
+    return res, alphas
