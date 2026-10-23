@@ -6,6 +6,7 @@ Visual elements:
 - Each thumbnail has:
   - 'Word: ...' label on top
   - Heatmap image below with rounded corners, hover effect, and click-to-open modal dialog.
+- Micro-interactions: Smooth hover zoom on thumbnails and interactive feedback.
 """
 
 import base64
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from frontend.icons import create_empty_state_pixmap
+from frontend.motion import SmoothThumbnailLabel
 
 
 def make_rounded_pixmap(pixmap: QPixmap, radius: int = 6) -> QPixmap:
@@ -46,7 +48,7 @@ def make_rounded_pixmap(pixmap: QPixmap, radius: int = 6) -> QPixmap:
 
 
 class AttentionCard(QFrame):
-    """Individual attention item with 'Word: ...' header and heatmap thumbnail."""
+    """Individual attention item with 'Word: ...' header and interactive heatmap thumbnail."""
 
     clicked = Signal(str, QPixmap, int)
 
@@ -72,19 +74,23 @@ class AttentionCard(QFrame):
         self.word_lbl.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.word_lbl)
 
-        # Heatmap thumbnail
-        self.img_lbl = QLabel()
-        self.img_lbl.setObjectName("attentionThumbLabel")
-        self.img_lbl.setAlignment(Qt.AlignCenter)
-
+        # Heatmap thumbnail with smooth hover zoom & border micro-interaction
         thumb_size = QSize(100, 68)
         scaled = self.pixmap.scaled(
             thumb_size,
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
         )
-        self.img_lbl.setPixmap(make_rounded_pixmap(scaled, radius=6))
+        self.img_lbl = SmoothThumbnailLabel(scaled)
         layout.addWidget(self.img_lbl)
+
+    def enterEvent(self, event):
+        self.img_lbl.set_hovered(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.img_lbl.set_hovered(False)
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -109,7 +115,7 @@ class AttentionsView(QWidget):
 
         self.stack = QStackedWidget()
 
-        # Page 0: Empty state (matching Image 1)
+        # Page 0: Empty state (matching Image 1) - strictly identical geometry to CaptionResultsView
         self.empty_page = QWidget()
         empty_layout = QVBoxLayout(self.empty_page)
         empty_layout.setContentsMargins(20, 40, 20, 40)
@@ -120,6 +126,8 @@ class AttentionsView(QWidget):
         cloud_lbl.setPixmap(create_empty_state_pixmap(240, 180))
         cloud_lbl.setAlignment(Qt.AlignCenter)
         empty_layout.addWidget(cloud_lbl)
+
+        empty_layout.addSpacing(6)
 
         title_lbl = QLabel("No image yet")
         title_lbl.setObjectName("emptyTitle")

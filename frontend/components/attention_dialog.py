@@ -5,7 +5,7 @@ Visual elements:
 - Clean 'X' close button at top-right
 - Centered large view of the selected attention heatmap image with rounded corners
 - Centered bottom label: 'Word: ...'
-- Strict adherence to Image 4: No arbitrary extra buttons or banners.
+- Micro-interactions: Silky opacity entrance and exit animations.
 """
 
 import base64
@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from frontend.motion import ModalFadeController
 
 
 class ScaledHeatmapLabel(QLabel):
@@ -69,7 +71,7 @@ class ScaledHeatmapLabel(QLabel):
 
 
 class AttentionDialog(QDialog):
-    """Modal popup dialog matching Image 4."""
+    """Modal popup dialog matching Image 4 with smooth entrance and exit animations."""
 
     def __init__(
         self,
@@ -88,6 +90,8 @@ class AttentionDialog(QDialog):
         self.pixmap = pixmap
         self.current_index = current_index
         self.all_steps = all_steps or []
+
+        self._fade_controller = ModalFadeController(self, duration_in=180, duration_out=130)
 
         self.setWindowTitle("Attention Detail")
         self.setModal(True)
@@ -111,7 +115,7 @@ class AttentionDialog(QDialog):
         self.close_btn.setObjectName("modalCloseXBtn")
         self.close_btn.setCursor(Qt.PointingHandCursor)
         self.close_btn.setFixedSize(30, 30)
-        self.close_btn.clicked.connect(self.accept)
+        self.close_btn.clicked.connect(self.close_animated)
         top_bar.addWidget(self.close_btn)
 
         main_layout.addLayout(top_bar)
@@ -126,6 +130,13 @@ class AttentionDialog(QDialog):
         self.bottom_word_lbl.setObjectName("modalWordLabel")
         self.bottom_word_lbl.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.bottom_word_lbl, 0)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fade_controller.animate_open()
+
+    def close_animated(self):
+        self._fade_controller.animate_close(on_closed=self.accept)
 
     def _load_current_step(self):
         if self.all_steps and 0 <= self.current_index < len(self.all_steps):
@@ -153,5 +164,6 @@ class AttentionDialog(QDialog):
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key_Escape:
-            self.accept()
+            self.close_animated()
+            return
         super().keyPressEvent(event)

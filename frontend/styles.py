@@ -141,7 +141,7 @@ QFrame#tabBarContainer {
 }
 
 QPushButton#tabBtnActive {
-    background-color: #FFFFFF;
+    background: transparent;
     color: #2563EB;
     font-size: 15px;
     font-weight: 700;
@@ -150,7 +150,7 @@ QPushButton#tabBtnActive {
 }
 
 QPushButton#tabBtnInactive {
-    background-color: #DCE5EE;
+    background: transparent;
     color: #0F172A;
     font-size: 15px;
     font-weight: 700;
@@ -159,7 +159,7 @@ QPushButton#tabBtnInactive {
 }
 
 QPushButton#tabBtnInactive:hover {
-    background-color: #D0DAE5;
+    color: #1E40AF;
 }
 
 /* Empty State */

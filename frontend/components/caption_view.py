@@ -3,11 +3,12 @@
 Handles:
 - Empty state (Image 1): Cloud illustration, 'No image yet', and subtext.
 - Result state (Image 2): Top image preview card + Bottom centered caption card.
+- Micro-interaction: Animated loading ellipsis while waiting for AI caption.
 """
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -59,6 +60,8 @@ class CaptionResultsView(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self._loading_timer: Optional[QTimer] = None
+        self._dot_count: int = 0
         self._init_ui()
 
     def _init_ui(self):
@@ -68,7 +71,7 @@ class CaptionResultsView(QWidget):
 
         self.stack = QStackedWidget()
 
-        # Page 0: Empty state (Image 1)
+        # Page 0: Empty state (Image 1) - strictly identical geometry to AttentionsView
         self.empty_page = QWidget()
         empty_layout = QVBoxLayout(self.empty_page)
         empty_layout.setContentsMargins(20, 40, 20, 40)
@@ -128,15 +131,44 @@ class CaptionResultsView(QWidget):
         layout.addWidget(self.stack)
         self.stack.setCurrentIndex(0)
 
+    def _start_loading_animation(self):
+        self._stop_loading_animation()
+        self._dot_count = 0
+        self._loading_timer = QTimer(self)
+        self._loading_timer.setInterval(360)
+
+        def update_dots():
+            self._dot_count = (self._dot_count % 3) + 1
+            dots = "." * self._dot_count
+            self.caption_text.setText(f"Generating caption{dots}")
+
+        self._loading_timer.timeout.connect(update_dots)
+        self._loading_timer.start()
+
+    def _stop_loading_animation(self):
+        if self._loading_timer and self._loading_timer.isActive():
+            self._loading_timer.stop()
+            self._loading_timer = None
+
     def show_empty(self):
+        self._stop_loading_animation()
         self.stack.setCurrentIndex(0)
 
     def set_content(self, pixmap: QPixmap, caption: str):
         self.image_label.set_pixmap(pixmap)
-        self.caption_text.setText(caption or "A picture about a mountain")
+        clean_caption = caption or "A picture about a mountain"
+
+        if "Generating" in clean_caption:
+            self.caption_text.setText("Generating caption...")
+            self._start_loading_animation()
+        else:
+            self._stop_loading_animation()
+            self.caption_text.setText(clean_caption)
+
         self.stack.setCurrentIndex(1)
 
     def clear(self):
+        self._stop_loading_animation()
         self.image_label.set_pixmap(None)
         self.caption_text.setText("")
         self.stack.setCurrentIndex(0)

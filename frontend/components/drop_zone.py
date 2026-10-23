@@ -2,7 +2,7 @@
 
 Visual elements:
 - White modern card container with header (Header photo icon + 'Upload Image' + subtitle)
-- Dashed dropzone frame with photo-plus illustration
+- Dashed dropzone frame with photo-plus illustration centered
 - 'Drop your image here' & 'or click to browse' text
 - Blue 'Choose File' button with upload icon
 - 'Supports JPG,PNG,WEBG (max 10MB)' footer text
@@ -77,17 +77,18 @@ class DropZone(QFrame):
         self.drop_box = QFrame()
         self.drop_box.setObjectName("dropZoneBox")
         self.drop_box.setCursor(Qt.PointingHandCursor)
+        self.drop_box.setAcceptDrops(True)
 
         box_layout = QVBoxLayout(self.drop_box)
         box_layout.setContentsMargins(16, 24, 16, 22)
         box_layout.setSpacing(8)
         box_layout.setAlignment(Qt.AlignCenter)
 
-        # Center photo-plus illustration
-        illus_lbl = QLabel()
-        illus_lbl.setPixmap(create_dropzone_illustration(64, 64))
-        illus_lbl.setAlignment(Qt.AlignCenter)
-        box_layout.addWidget(illus_lbl)
+        # Center photo-plus illustration (properly centered without fixed-size alignment offset)
+        self.illus_lbl = QLabel()
+        self.illus_lbl.setPixmap(create_dropzone_illustration(64, 64))
+        self.illus_lbl.setAlignment(Qt.AlignCenter)
+        box_layout.addWidget(self.illus_lbl)
 
         box_layout.addSpacing(4)
 
