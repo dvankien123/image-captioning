@@ -1,3 +1,4 @@
+import argparse
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -97,7 +98,15 @@ def validate(model, loader, criterion, device, doubly_stochastic_lambda=1.0):
 
     return total_loss / total_tokens
 
-def main(config, config_dir):
+def load_training_checkpoint(path):
+    """Load a checkpoint while supporting older PyTorch versions."""
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def main(config, config_dir, resume=False):
     torch.manual_seed(config["train"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -198,9 +207,55 @@ def main(config, config_dir):
     )
 
     checkpoint_path = config_dir / config["paths"]["checkpoint"]
+    last_checkpoint_path = config_dir / config["paths"].get(
+        "last_checkpoint", "checkpoints/last_checkpoint.pth"
+    )
+    start_epoch = 1
+
+    if resume:
+        resume_candidates = [
+            path for path in (last_checkpoint_path, checkpoint_path) if path.is_file()
+        ]
+        if not resume_candidates:
+            raise FileNotFoundError(
+                "No checkpoint is available to resume from. Expected one of: "
+                f"{last_checkpoint_path} or {checkpoint_path}"
+            )
+        resume_path = max(resume_candidates, key=lambda path: path.stat().st_mtime)
+
+        checkpoint = load_training_checkpoint(resume_path)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if checkpoint.get("scheduler_state_dict") is not None:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+        saved_early_stopping = checkpoint.get("early_stopping_state")
+        if saved_early_stopping:
+            early_stopping.best_loss = saved_early_stopping.get(
+                "best_loss", checkpoint.get("val_loss", float("inf"))
+            )
+            early_stopping.counter = saved_early_stopping.get("counter", 0)
+            early_stopping.should_stop = saved_early_stopping.get("should_stop", False)
+        elif checkpoint.get("val_loss") is not None:
+            # Older best-model checkpoints did not include early-stopping state.
+            early_stopping.best_loss = checkpoint["val_loss"]
+
+        if checkpoint.get("torch_rng_state") is not None:
+            torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
+        cuda_rng_states = checkpoint.get("cuda_rng_state_all")
+        if torch.cuda.is_available() and cuda_rng_states:
+            for device_index, rng_state in enumerate(cuda_rng_states[:torch.cuda.device_count()]):
+                torch.cuda.set_rng_state(rng_state.cpu(), device_index)
+
+        start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        print(f"Resumed from {resume_path} at epoch {start_epoch}")
+        if early_stopping.should_stop:
+            print("This checkpoint had already reached early stopping; no further epochs will run.")
+            return
 
     # --- Vòng lặp epoch ---
-    for epoch in range(1, config["train"]["epochs"] + 1):
+    for epoch in range(start_epoch, config["train"]["epochs"] + 1):
         train_loss = train_one_epoch(
             model, train_loader, criterion, optimizer, device,
             grad_clip=config["train"]["grad_clip"],
@@ -217,8 +272,17 @@ def main(config, config_dir):
 
         improved = early_stopping.step(val_loss)
         if improved:
-            save_checkpoint(model, optimizer, epoch, val_loss, vocab, model_config, checkpoint_path)
+            save_checkpoint(
+                model, optimizer, epoch, val_loss, vocab, model_config, checkpoint_path,
+                scheduler=scheduler, early_stopping=early_stopping,
+            )
             print(f"  -> Saved checkpoint (val_loss={val_loss:.4f})")
+
+        save_checkpoint(
+            model, optimizer, epoch, val_loss, vocab, model_config, last_checkpoint_path,
+            scheduler=scheduler, early_stopping=early_stopping,
+        )
+        print(f"  -> Saved latest training state to {last_checkpoint_path}")
 
         if early_stopping.should_stop:
             print(
@@ -228,6 +292,3 @@ def main(config, config_dir):
     print("Training done! Best val_loss:", early_stopping.best_loss)
 
 
-if __name__ == "__main__":
-    config, config_dir = load_config()
-    main(config, config_dir)

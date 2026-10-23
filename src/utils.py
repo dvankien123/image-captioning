@@ -7,18 +7,47 @@ import pickle
 import yaml
 import torch
 
-def save_checkpoint(model, optimizer, epoch, val_loss, vocab, model_config, path):
-    import torch
+def save_checkpoint(
+    model, optimizer, epoch, val_loss, vocab, model_config, path,
+    scheduler=None, early_stopping=None,
+):
+    save_training_state(
+        model, optimizer, epoch, val_loss, vocab, model_config, path,
+        scheduler=scheduler, early_stopping=early_stopping,
+    )
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save({
+
+def save_training_state(
+    model, optimizer, epoch, val_loss, vocab, model_config, path,
+    scheduler=None, early_stopping=None,
+):
+    """Save an epoch-boundary checkpoint that can be used to resume training."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    checkpoint = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": epoch,
         "val_loss": val_loss,
         "vocab": vocab,
         "model_config": model_config,
-    }, path)
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+        "early_stopping_state": (
+            {
+                "best_loss": early_stopping.best_loss,
+                "counter": early_stopping.counter,
+                "should_stop": early_stopping.should_stop,
+            }
+            if early_stopping is not None else None
+        ),
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+    temporary_path = path.with_name(path.name + ".tmp")
+    torch.save(checkpoint, temporary_path)
+    os.replace(temporary_path, path)
 
 
 class EarlyStopping:
