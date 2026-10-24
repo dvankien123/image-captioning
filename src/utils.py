@@ -7,18 +7,46 @@ import pickle
 import yaml
 import torch
 
-def save_checkpoint(model, optimizer, epoch, val_loss, vocab, model_config, path):
-    import torch
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save({
+def save_checkpoint(
+    model,
+    optimizer,
+    epoch,
+    val_loss,
+    vocab,
+    model_config,
+    path,
+    scheduler=None,
+    early_stopping=None,
+    **extra_state,
+):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": epoch,
         "val_loss": val_loss,
         "vocab": vocab,
         "model_config": model_config,
-    }, path)
+    }
+    if scheduler is not None:
+        state["scheduler_state_dict"] = scheduler.state_dict()
+    if early_stopping is not None:
+        state["early_stopping_state"] = early_stopping.state_dict()
+    state.update(extra_state)
+    torch.save(state, path)
+
+
+def load_checkpoint(path, map_location=None):
+    """Load a PyTorch checkpoint file safely across versions."""
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Checkpoint file not found: {path}")
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
 
 
 class EarlyStopping:
@@ -40,6 +68,20 @@ class EarlyStopping:
                 self.should_stop = True
             return False  # không cải thiện
 
+    def state_dict(self):
+        return {
+            "best_loss": self.best_loss,
+            "counter": self.counter,
+            "should_stop": self.should_stop,
+        }
+
+    def load_state_dict(self, state_dict):
+        if not state_dict:
+            return
+        self.best_loss = state_dict.get("best_loss", float("inf"))
+        self.counter = state_dict.get("counter", 0)
+        self.should_stop = state_dict.get("should_stop", False)
+
 
 def save_vocab(vocab):
     config, config_dir = load_config()
@@ -48,15 +90,17 @@ def save_vocab(vocab):
 
     with open(vocab_path, "wb") as f:
         pickle.dump(vocab, f)
-    
+
+
 def load_vocab(vocab_path):
     vocab_path = Path(vocab_path).expanduser()
 
     if not Path(vocab_path).is_file():
         raise FileNotFoundError(f"Vocab file not found: {vocab_path}")
-    
+
     with open(vocab_path, "rb") as f:
         return pickle.load(f)
+
 
 def save_splits(train, val, test):
     config, config_dir = load_config()
@@ -68,22 +112,24 @@ def save_splits(train, val, test):
     for path in (train_path, val_path, test_path):
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(train_path, 'w', encoding='utf-8') as f:
+    with open(train_path, "w", encoding="utf-8") as f:
         json.dump(train, f)
-    with open(val_path, 'w', encoding='utf-8') as f:
+    with open(val_path, "w", encoding="utf-8") as f:
         json.dump(val, f)
-    with open(test_path, 'w', encoding='utf-8') as f:
+    with open(test_path, "w", encoding="utf-8") as f:
         json.dump(test, f)
+
 
 def load_splits(data_path):
     data_path = Path(data_path).expanduser()
 
     if not data_path.is_file():
         raise FileNotFoundError(f"One or more split files not found: {data_path}")
-    
-    with open(data_path, 'r', encoding='utf-8') as f:
+
+    with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return data
+
 
 def load_config(config_path=None):
     """Load config, defaulting to the project-root file independent of cwd."""
@@ -95,7 +141,7 @@ def load_config(config_path=None):
 
     if not config_path.is_file():
         raise FileNotFoundError(f"Config file not found {config_path}")
-    
+
     with config_path.open("r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     return config, config_path.parent
