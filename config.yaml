@@ -6,35 +6,37 @@ paths:
   test_json: data/splits/test.json
   vocab: data/processed/vocab.pickle
   checkpoint: checkpoints/best_model.pth
-  word2vec: data/raw/GoogleNews-vectors-negative300.bin
-  embedding_matrix: data/processed/embedding_matrix.pt
+  last_checkpoint: checkpoints/last_checkpoint.pth
+
 data:
   freq_threshold: 5        # từ xuất hiện < 5 lần -> <unk>
   max_len: 30               # độ dài caption tối đa (dùng khi lọc/sinh)
   image_size: 224
+
 model:
-  embed_size: 300            # chiều embedding (khớp với Word2Vec 300d)
-  hidden_size: 512           # chiều hidden state của LSTM
-  attention_dim: 512         # kích thước không gian Attention
-  encoder_dim: 2048          # số kênh trích xuất từ ResNet-50 layer4
-  dropout: 0.5
-  doubly_stochastic_lambda: 1.0 # hệ số phạt doubly stochastic attention
-  train_backbone: false
-  use_pretrained_embedding: true
-  freeze_embedding: false
+  vit_name: "vit_b_16"      # ViT backbone từ torchvision
+  d_model: 512              # Chiều biểu diễn ẩn Transformer
+  nhead: 8                  # Số head trong Multi-Head Attention
+  num_decoder_layers: 3     # Số tầng Transformer Decoder (theo yêu cầu: 3 tầng)
+  dim_feedforward: 2048     # Chiều tầng ẩn FFN bên trong Transformer
+  dropout: 0.1              # Dropout rate chuẩn cho Transformer
+  train_backbone: false     # Đóng băng hoàn toàn ViT backbone
+  tie_weights: true         # Chia sẻ trọng số giữa embedding và fc output layer
+
 train:
   seed: 42
   batch_size: 64
-  lr: 0.0003                  # learning rate cho dec oder + lớp fc/bn của encoder
-  lr_finetune: 0.00001        # learning rate riêng cho layer4 của ResNet khi fine-tune
+  lr: 0.0003
+  lr_finetune: 0.00001
   epochs: 30
-  grad_clip: 5.0
+  grad_clip: 1.0
   num_workers: 4
   early_stopping_patience: 5
   lr_scheduler_patience: 2
   lr_scheduler_factor: 0.5
+
 evaluation:
-  method: greedy
+  method: beam
   beam_size: 3
   batch_size: 16
   num_workers: 2
