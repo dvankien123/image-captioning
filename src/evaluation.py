@@ -47,14 +47,16 @@ def load_model(config, config_dir, vocab, device):
 
     # Use the architecture recorded with the weights if the config has since changed.
     saved_config = checkpoint.get("model_config") or config["model"]
-    model = CaptionModel(
-        embed_size=saved_config["embed_size"],
-        hidden_size=saved_config["hidden_size"],
-        vocab_size=saved_config.get("vocab_size", len(vocab)),
-        attention_dim=saved_config.get("attention_dim", config["model"].get("attention_dim", 512)),
-        encoder_dim=saved_config.get("encoder_dim", config["model"].get("encoder_dim", 2048)),
-        dropout=saved_config.get("dropout", 0.5),
-    ).to(device)
+    model_kwargs = {
+        "vocab_size": saved_config.get("vocab_size", len(vocab)),
+        "d_model": saved_config.get("d_model", saved_config.get("embed_size", 512)),
+        "nhead": saved_config.get("nhead", 8),
+        "num_decoder_layers": saved_config.get("num_decoder_layers", 3),
+        "dim_feedforward": saved_config.get("dim_feedforward", 2048),
+        "dropout": saved_config.get("dropout", 0.1),
+        "tie_weights": saved_config.get("tie_weights", True),
+    }
+    model = CaptionModel(**model_kwargs).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model
