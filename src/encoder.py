@@ -1,40 +1,65 @@
-"""ResNet image encoder extracting spatial feature maps for visual attention."""
+"""Vision Transformer (ViT) image encoder extracting patch token representations."""
 
 import torch
 from torch import nn
 from torchvision import models
 
 
-class Encoder(nn.Module):
-    def __init__(self, encoded_image_size=7):
+class ViTEncoder(nn.Module):
+    """Vision Transformer (ViT-B/16) image encoder.
+
+    Extracts sequence of patch tokens from an image:
+    (B, 3, 224, 224) -> (B, 197, 768) -> projected to (B, 197, d_model).
+    Backbone weights are completely frozen.
+    """
+
+    def __init__(self, d_model=512, pretrained=True):
         super().__init__()
-        self.encoded_image_size = encoded_image_size
+        self.d_model = d_model
 
-        resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-        # Remove avgpool and fc to retain spatial features (B, 2048, H, W)
-        modules = list(resnet.children())[:-2]
-        self.backbone = nn.Sequential(*modules)
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((encoded_image_size, encoded_image_size))
+        weights = models.ViT_B_16_Weights.DEFAULT if pretrained else None
+        vit = models.vit_b_16(weights=weights)
 
-        for param in self.backbone.parameters():
+        self.conv_proj = vit.conv_proj
+        self.class_token = vit.class_token
+        self.encoder = vit.encoder
+        self.proj = nn.Linear(768, d_model)
+
+        # Completely freeze backbone weights
+        for param in self.conv_proj.parameters():
+            param.requires_grad = False
+        self.class_token.requires_grad = False
+        for param in self.encoder.parameters():
             param.requires_grad = False
 
     def forward(self, images):
-        if self.training and not any(param.requires_grad for param in self.backbone[-1].parameters()):
-            # Avoid building a gradient graph while backbone weights are frozen.
-            with torch.no_grad():
-                features = self.backbone(images)
-        else:
-            features = self.backbone(images)
+        """Forward pass extracting patch tokens.
 
-        # features: (B, 2048, H, W) -> adaptive pool -> (B, 2048, 7, 7)
-        features = self.adaptive_pool(features)
-        # Permute to (B, 7, 7, 2048) -> reshape to (B, 49, 2048)
-        features = features.permute(0, 2, 3, 1)
-        features = features.reshape(features.size(0), -1, 2048)
+        Args:
+            images (torch.Tensor): (batch_size, 3, 224, 224)
+
+        Returns:
+            features (torch.Tensor): (batch_size, 197, d_model)
+        """
+        # Backbone is completely frozen, run with torch.no_grad() for speed and memory saving
+        with torch.no_grad():
+            x = self.conv_proj(images)  # (B, 768, 14, 14)
+            x = x.flatten(2).transpose(1, 2)  # (B, 196, 768)
+            batch_class_token = self.class_token.expand(x.shape[0], -1, -1)
+            x = torch.cat([batch_class_token, x], dim=1)  # (B, 197, 768)
+            features = self.encoder(x)  # (B, 197, 768)
+
+        # Project to decoder dimension d_model (trainable projection layer)
+        features = self.proj(features)  # (B, 197, d_model)
         return features
 
-    def unfreeze_backbone(self):
-        for param in self.backbone[-1].parameters():
+    def unfreeze_backbone(self, num_layers=2):
+        """Optional fine-tuning helper (retained for backward compatibility)."""
+        for param in self.encoder.layers[-num_layers:].parameters():
+            param.requires_grad = True
+        for param in self.encoder.ln.parameters():
             param.requires_grad = True
 
+
+# Backward compatibility alias
+Encoder = ViTEncoder
