@@ -1,149 +1,271 @@
-"""LSTM caption decoder with visual attention and autoregressive sampling."""
+"""Transformer caption decoder with multi-head self-attention and visual cross-attention."""
 
+import math
 import torch
 from torch import nn
 
-from src.attention import VisualAttention
 
+class TransformerDecoderLayer(nn.Module):
+    """Single layer of Transformer Decoder with cross-attention weights retention."""
 
-class Decoder(nn.Module):
-    def __init__(
-        self,
-        embed_size,
-        hidden_size,
-        vocab_size,
-        attention_dim=512,
-        encoder_dim=2048,
-        dropout=0.5,
-        pretrained_embeddings=None,
-        freeze_embedding=False,
-    ):
+    def __init__(self, d_model=512, nhead=8, dim_feedforward=2048, dropout=0.1):
         super().__init__()
-        self.embed_size = embed_size
-        self.hidden_size = hidden_size
-        self.vocab_size = vocab_size
-        self.attention_dim = attention_dim
-        self.encoder_dim = encoder_dim
-
-        self.attention = VisualAttention(
-            encoder_dim=encoder_dim,
-            hidden_size=hidden_size,
-            attention_dim=attention_dim,
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=d_model, num_heads=nhead, dropout=dropout, batch_first=True
+        )
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=d_model, num_heads=nhead, dropout=dropout, batch_first=True
         )
 
-        if pretrained_embeddings is not None:
-            self.embed = nn.Embedding.from_pretrained(
-                pretrained_embeddings,
-                freeze=freeze_embedding,
-                padding_idx=0,
-            )
-        else:
-            self.embed = nn.Embedding(vocab_size, embed_size, padding_idx=0)
-
-        # Initial hidden/cell states projected from mean spatial features
-        self.init_h = nn.Linear(encoder_dim, hidden_size)
-        self.init_c = nn.Linear(encoder_dim, hidden_size)
-
-        # LSTMCell input: [word_embedding; context_vector]
-        self.lstm = nn.LSTMCell(embed_size + encoder_dim, hidden_size)
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size, vocab_size)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
 
-    def init_hidden_state(self, encoder_out):
-        """Initialize LSTM hidden and cell states from mean encoder features."""
-        mean_encoder_out = encoder_out.mean(dim=1)
-        h = torch.tanh(self.init_h(mean_encoder_out))
-        c = torch.tanh(self.init_c(mean_encoder_out))
-        return h, c
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
 
-    def forward(self, encoder_out, captions, lengths):
-        """Unroll decoding over time steps with teacher forcing.
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
+
+        self.activation = nn.GELU()
+
+    def forward(
+        self,
+        tgt,
+        memory,
+        tgt_mask=None,
+        tgt_key_padding_mask=None,
+        memory_key_padding_mask=None,
+        return_cross_attn=False,
+    ):
+        # 1. Masked Self-Attention
+        tgt2, _ = self.self_attn(
+            tgt, tgt, tgt,
+            attn_mask=tgt_mask,
+            key_padding_mask=tgt_key_padding_mask,
+            need_weights=False,
+        )
+        tgt = self.norm1(tgt + self.dropout1(tgt2))
+
+        # 2. Cross-Attention over visual features (memory)
+        tgt2, cross_attn_weights = self.cross_attn(
+            tgt, memory, memory,
+            key_padding_mask=memory_key_padding_mask,
+            need_weights=return_cross_attn,
+            average_attn_weights=True,
+        )
+        tgt = self.norm2(tgt + self.dropout2(tgt2))
+
+        # 3. Position-wise Feed-Forward Network
+        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        tgt = self.norm3(tgt + self.dropout3(tgt2))
+
+        return tgt, cross_attn_weights
+
+
+class TransformerDecoder(nn.Module):
+    """Transformer Caption Decoder using learnable word embeddings and multi-head cross-attention."""
+
+    def __init__(
+        self,
+        vocab_size,
+        d_model=512,
+        nhead=8,
+        num_decoder_layers=3,
+        dim_feedforward=2048,
+        dropout=0.1,
+        max_len=100,
+        tie_weights=True,
+        # Backward compatibility parameters
+        embed_size=None,
+        hidden_size=None,
+        attention_dim=None,
+        encoder_dim=None,
+        pretrained_embeddings=None,
+        freeze_embedding=False,
+        **kwargs,
+    ):
+        super().__init__()
+        # If embed_size is passed and d_model is not explicitly set, use embed_size
+        if embed_size is not None and d_model == 512 and embed_size != 300:
+            d_model = embed_size
+
+        self.d_model = d_model
+        self.vocab_size = vocab_size
+        self.max_len = max_len
+
+        # Learnable word embedding (no external 3.64GB Word2Vec dependency)
+        self.embed = nn.Embedding(vocab_size, d_model, padding_idx=0)
+        # Learnable positional embedding
+        self.pos_emb = nn.Embedding(max_len, d_model)
+
+        self.emb_dropout = nn.Dropout(dropout)
+        self.emb_layer_norm = nn.LayerNorm(d_model)
+
+        self.layers = nn.ModuleList([
+            TransformerDecoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+            )
+            for _ in range(num_decoder_layers)
+        ])
+
+        self.final_norm = nn.LayerNorm(d_model)
+        self.fc = nn.Linear(d_model, vocab_size, bias=False)
+
+        if tie_weights:
+            self.fc.weight = self.embed.weight
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def generate_square_subsequent_mask(self, sz, device):
+        mask = torch.triu(torch.ones(sz, sz, dtype=torch.bool, device=device), diagonal=1)
+        return mask
+
+    def forward(self, encoder_out, captions, lengths=None):
+        """Forward pass with teacher forcing for training.
 
         Args:
-            encoder_out (torch.Tensor): (batch_size, num_pixels, encoder_dim)
-            captions (torch.Tensor): (batch_size, max_len)
-            lengths (torch.Tensor): (batch_size,)
+            encoder_out (torch.Tensor): Visual memory of shape (batch_size, 197, d_model).
+            captions (torch.Tensor): Padded captions of shape (batch_size, seq_len).
+            lengths (torch.Tensor, optional): Lengths of captions.
 
         Returns:
-            predictions (torch.Tensor): (batch_size, max_decode_len, vocab_size)
-            alphas (torch.Tensor): (batch_size, max_decode_len, num_pixels)
+            predictions (torch.Tensor): Output logits of shape (batch_size, seq_len - 1, vocab_size).
+            last_alphas (torch.Tensor): Cross-attention weights of shape (batch_size, seq_len - 1, 197).
         """
-        batch_size = encoder_out.size(0)
-        num_pixels = encoder_out.size(1)
+        device = captions.device
+        # Teacher forcing input: tokens from 0 to T-1
+        tgt_input = captions[:, :-1]
+        seq_len = tgt_input.size(1)
 
-        decode_lengths = (lengths - 1).clamp(min=1)
-        max_decode_len = int(decode_lengths.max().item())
+        pos = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, seq_len)
+        x = self.embed(tgt_input) * math.sqrt(self.d_model) + self.pos_emb(pos)
+        x = self.emb_layer_norm(self.emb_dropout(x))
 
-        embeddings = self.embed(captions)
-        h, c = self.init_hidden_state(encoder_out)
+        tgt_mask = self.generate_square_subsequent_mask(seq_len, device)
+        tgt_key_padding_mask = (tgt_input == 0)  # <pad> is 0
 
-        predictions = torch.zeros(batch_size, max_decode_len, self.vocab_size, device=encoder_out.device)
-        alphas = torch.zeros(batch_size, max_decode_len, num_pixels, device=encoder_out.device)
+        last_alphas = None
+        for i, layer in enumerate(self.layers):
+            is_last = (i == len(self.layers) - 1)
+            x, alphas = layer(
+                tgt=x,
+                memory=encoder_out,
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                return_cross_attn=is_last,
+            )
+            if is_last:
+                last_alphas = alphas
 
-        for t in range(max_decode_len):
-            context, alpha = self.attention(encoder_out, h)
-            # embeddings[:, t, :] is token y_t (<start> at t=0)
-            lstm_input = torch.cat([embeddings[:, t, :], context], dim=1)
-            h, c = self.lstm(lstm_input, (h, c))
-            output = self.fc(self.dropout(h))
+        x = self.final_norm(x)
+        predictions = self.fc(x)  # (B, seq_len, vocab_size)
 
-            predictions[:, t, :] = output
-            alphas[:, t, :] = alpha
+        return predictions, last_alphas
 
-        return predictions, alphas
-
-    def sample(self, encoder_out, max_len=30, return_alphas=False):
-        """Greedily decode captions from spatial image features.
+    def forward_step(self, encoder_out, current_tokens):
+        """Run a single forward pass given currently generated tokens.
 
         Args:
-            encoder_out (torch.Tensor): (batch_size, num_pixels, encoder_dim)
-            max_len (int): Maximum length of generated caption.
-            return_alphas (bool): Whether to return attention weights.
+            encoder_out (torch.Tensor): (batch_size, 197, d_model)
+            current_tokens (torch.Tensor): (batch_size, cur_len)
+
+        Returns:
+            logits (torch.Tensor): Logits for the last token position (batch_size, vocab_size).
+            last_alpha (torch.Tensor): Cross-attention weights for the last token (batch_size, 197).
+        """
+        device = current_tokens.device
+        cur_len = current_tokens.size(1)
+
+        pos = torch.arange(cur_len, device=device).unsqueeze(0)
+        x = self.embed(current_tokens) * math.sqrt(self.d_model) + self.pos_emb(pos)
+        x = self.emb_layer_norm(self.emb_dropout(x))
+
+        tgt_mask = self.generate_square_subsequent_mask(cur_len, device)
+        tgt_key_padding_mask = (current_tokens == 0)
+
+        last_alpha = None
+        for i, layer in enumerate(self.layers):
+            is_last = (i == len(self.layers) - 1)
+            x, alphas = layer(
+                tgt=x,
+                memory=encoder_out,
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                return_cross_attn=is_last,
+            )
+            if is_last and alphas is not None:
+                last_alpha = alphas[:, -1, :]  # (B, 197) for the latest token
+
+        x = self.final_norm(x)
+        logits = self.fc(x[:, -1, :])  # (B, vocab_size)
+        return logits, last_alpha
+
+    def sample(self, encoder_out, max_len=30, return_alphas=False):
+        """Greedily decode captions autoregressively.
+
+        Args:
+            encoder_out (torch.Tensor): Visual memory (batch_size, 197, d_model).
+            max_len (int): Maximum length to generate.
+            return_alphas (bool): Whether to return cross-attention heatmaps.
 
         Returns:
             sampled_ids (list[list[int]]): Generated token IDs per image.
-            alphas (list[torch.Tensor], optional): Attention weights per image.
+            alphas (list[torch.Tensor], optional): Cross-attention weights per image.
         """
         batch_size = encoder_out.size(0)
-        num_pixels = encoder_out.size(1)
         device = encoder_out.device
 
-        h, c = self.init_hidden_state(encoder_out)
-        prev_words = torch.full((batch_size,), 1, dtype=torch.long, device=device)
+        start_id = 1  # <start>
+        end_id = 2    # <end>
+        pad_id = 0    # <pad>
 
+        current_tokens = torch.full((batch_size, 1), start_id, dtype=torch.long, device=device)
         sampled_ids = [[] for _ in range(batch_size)]
         all_alphas = [[] for _ in range(batch_size)]
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
         for _ in range(max_len):
-            context, alpha = self.attention(encoder_out, h)
-            word_emb = self.embed(prev_words)
-            lstm_input = torch.cat([word_emb, context], dim=1)
-            h, c = self.lstm(lstm_input, (h, c))
+            logits, step_alpha = self.forward_step(encoder_out, current_tokens)
 
-            outputs = self.fc(h).clone()
-            outputs[:, 0] = float("-inf")  # <pad>
-            outputs[:, 1] = float("-inf")  # <start>
+            # Prevent sampling <pad> or <start>
+            logits[:, pad_id] = float("-inf")
+            logits[:, start_id] = float("-inf")
 
-            predicted = outputs.argmax(dim=1)
+            predicted = logits.argmax(dim=-1)  # (B,)
 
             for i in range(batch_size):
                 if not finished[i]:
-                    sampled_ids[i].append(predicted[i].item())
-                    if return_alphas:
-                        all_alphas[i].append(alpha[i].detach().cpu())
-                    if predicted[i].item() == 2:  # <end>
+                    token_id = predicted[i].item()
+                    sampled_ids[i].append(token_id)
+                    if return_alphas and step_alpha is not None:
+                        all_alphas[i].append(step_alpha[i].detach().cpu())
+                    if token_id == end_id:
                         finished[i] = True
 
             if finished.all():
                 break
 
-            prev_words = predicted
+            current_tokens = torch.cat([current_tokens, predicted.unsqueeze(1)], dim=1)
 
         if return_alphas:
             stacked_alphas = [
-                torch.stack(a) if a else torch.empty(0, num_pixels)
+                torch.stack(a) if a else torch.empty(0, encoder_out.size(1))
                 for a in all_alphas
             ]
             return sampled_ids, stacked_alphas
         return sampled_ids
+
+
+# Backward compatibility alias
+Decoder = TransformerDecoder
