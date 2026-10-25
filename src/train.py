@@ -139,6 +139,7 @@ def main(config, config_dir, resume=None):
 
     start_epoch = 0
     checkpoint = None
+    finetune_transition = False
     if resume:
         if not last_checkpoint_path.is_file():
             raise FileNotFoundError(
@@ -146,6 +147,24 @@ def main(config, config_dir, resume=None):
             )
         print(f"Resuming training from checkpoint: {last_checkpoint_path}")
         checkpoint = load_checkpoint(last_checkpoint_path, map_location=device)
+
+        last_model_config = checkpoint.get("model_config", {})
+        finetune_transition = (
+            config["model"]["train_backbone"]
+            and not last_model_config.get("train_backbone", False)
+        )
+        if finetune_transition:
+            if not best_checkpoint_path.is_file():
+                raise FileNotFoundError(
+                    "Fine-tuning transition requested, but best checkpoint not found: "
+                    f"{best_checkpoint_path}"
+                )
+            print(
+                "Fine-tuning transition detected; loading best checkpoint: "
+                f"{best_checkpoint_path}"
+            )
+            checkpoint = load_checkpoint(best_checkpoint_path, map_location=device)
+
         model.load_state_dict(checkpoint["model_state_dict"])
         start_epoch = checkpoint["epoch"]
 
@@ -161,14 +180,6 @@ def main(config, config_dir, resume=None):
     base_params = [
         param for param in trainable_params if id(param) not in backbone_param_ids
     ]
-
-    checkpoint_model_config = (checkpoint or {}).get("model_config", {})
-    checkpoint_trained_backbone = checkpoint_model_config.get("train_backbone", False)
-    finetune_transition = (
-        resume
-        and config["model"]["train_backbone"]
-        and not checkpoint_trained_backbone
-    )
 
     if finetune_transition:
         # Match the frozen checkpoint's original optimizer group before restoring
