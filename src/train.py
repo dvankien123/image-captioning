@@ -78,7 +78,10 @@ def validate(model, loader, criterion, device):
     return total_loss / max(total_tokens, 1)
 
 
-def main(config, config_dir, resume: bool = False):
+def main(config, config_dir, resume=None):
+    if resume is None:
+        resume = config["train"].get("resume", False)
+
     torch.manual_seed(config["train"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -129,8 +132,81 @@ def main(config, config_dir, resume: bool = False):
 
     model = CaptionModel(**model_config).to(device)
 
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(trainable_params, lr=config["train"]["lr"])
+    best_checkpoint_path = config_dir / config["paths"]["checkpoint"]
+    last_checkpoint_path = config_dir / config["paths"].get(
+        "last_checkpoint", "checkpoints/last_checkpoint.pth"
+    )
+
+    start_epoch = 0
+    checkpoint = None
+    if resume:
+        if not last_checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"Resume requested but last checkpoint not found: {last_checkpoint_path}"
+            )
+        print(f"Resuming training from checkpoint: {last_checkpoint_path}")
+        checkpoint = load_checkpoint(last_checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        start_epoch = checkpoint["epoch"]
+
+    backbone_params = []
+    if config["model"]["train_backbone"]:
+        backbone_module = model.encoder.encoder
+        backbone_params = [
+            *backbone_module.layers[-2:].parameters(),
+            *backbone_module.ln.parameters(),
+        ]
+    backbone_param_ids = {id(param) for param in backbone_params}
+    trainable_params = [param for param in model.parameters() if param.requires_grad]
+    base_params = [
+        param for param in trainable_params if id(param) not in backbone_param_ids
+    ]
+
+    checkpoint_model_config = (checkpoint or {}).get("model_config", {})
+    checkpoint_trained_backbone = checkpoint_model_config.get("train_backbone", False)
+    finetune_transition = (
+        resume
+        and config["model"]["train_backbone"]
+        and not checkpoint_trained_backbone
+    )
+
+    if finetune_transition:
+        # Match the frozen checkpoint's original optimizer group before restoring
+        # its state, then add newly unfrozen backbone parameters with fresh state.
+        optimizer = torch.optim.Adam(base_params, lr=config["train"]["lr"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        optimizer.add_param_group(
+            {
+                "params": backbone_params,
+                "lr": config["train"]["lr_finetune"]
+            }
+        )
+    elif (
+        resume
+        and config["model"]["train_backbone"]
+        and len(checkpoint["optimizer_state_dict"]["param_groups"]) == 2
+    ):
+        # Fine-tuning checkpoints created by this flow have separate base and
+        # backbone groups; rebuild the same structure before loading their state.
+        optimizer = torch.optim.Adam(
+            [
+                {
+                    "params": base_params,
+                    "lr": config["train"]["lr"]
+                },
+                {
+                    "params": backbone_params,
+                    "lr": config["train"]["lr_finetune"]
+                },
+            ]
+        )
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    else:
+        optimizer = torch.optim.Adam(
+            trainable_params, lr=config["train"]["lr"]
+        )
+        if resume:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     criterion = nn.CrossEntropyLoss(ignore_index=vocab.word2idx["<pad>"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -143,28 +219,12 @@ def main(config, config_dir, resume: bool = False):
         patience=config["train"].get("early_stopping_patience", 5)
     )
 
-    best_checkpoint_path = config_dir / config["paths"]["checkpoint"]
-    last_checkpoint_path = config_dir / config["paths"].get(
-        "last_checkpoint", "checkpoints/last_checkpoint.pth"
-    )
-
-    start_epoch = 0
-    if resume:
-        if not last_checkpoint_path.is_file():
-            raise FileNotFoundError(
-                f"Resume requested but last checkpoint not found: {last_checkpoint_path}"
-            )
-        print(f"Resuming training from checkpoint: {last_checkpoint_path}")
-        checkpoint = load_checkpoint(last_checkpoint_path, map_location=device)
-
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
+    if resume and not finetune_transition:
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         early_stopping.load_state_dict(checkpoint["early_stopping_state"])
         early_stopping.should_stop = False
 
-        start_epoch = checkpoint["epoch"]
+    if resume:
         print(
             f"Resumed at epoch {start_epoch} (val_loss={checkpoint['val_loss']}). "
             f"Training will continue from epoch {start_epoch + 1}."
