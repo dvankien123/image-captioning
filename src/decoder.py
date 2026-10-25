@@ -65,7 +65,7 @@ class TransformerDecoderLayer(nn.Module):
         return tgt, cross_attn_weights
 
 
-class TransformerDecoder(nn.Module):
+class Decoder(nn.Module):
     """Transformer Caption Decoder using learnable word embeddings and multi-head cross-attention."""
 
     def __init__(
@@ -78,19 +78,8 @@ class TransformerDecoder(nn.Module):
         dropout=0.1,
         max_len=100,
         tie_weights=True,
-        # Backward compatibility parameters
-        embed_size=None,
-        hidden_size=None,
-        attention_dim=None,
-        encoder_dim=None,
-        pretrained_embeddings=None,
-        freeze_embedding=False,
-        **kwargs,
     ):
         super().__init__()
-        # If embed_size is passed and d_model is not explicitly set, use embed_size
-        if embed_size is not None and d_model == 512 and embed_size != 300:
-            d_model = embed_size
 
         self.d_model = d_model
         self.vocab_size = vocab_size
@@ -265,7 +254,3 @@ class TransformerDecoder(nn.Module):
             ]
             return sampled_ids, stacked_alphas
         return sampled_ids
-
-
-# Backward compatibility alias
-Decoder = TransformerDecoder

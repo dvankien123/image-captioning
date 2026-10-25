@@ -13,7 +13,6 @@ class CaptionModel(nn.Module):
 
     def __init__(
         self,
-        *args,
         vocab_size=None,
         d_model=512,
         nhead=8,
@@ -21,28 +20,9 @@ class CaptionModel(nn.Module):
         dim_feedforward=2048,
         dropout=0.1,
         tie_weights=True,
-        embed_size=None,
-        hidden_size=None,
-        attention_dim=None,
-        encoder_dim=None,
-        pretrained_embeddings=None,
-        freeze_embedding=False,
-        **kwargs,
+        train_backbone=False
     ):
         super().__init__()
-
-        # Handle positional args for backward compatibility
-        if len(args) == 1:
-            vocab_size = args[0]
-        elif len(args) >= 3:
-            embed_size, hidden_size, vocab_size = args[0], args[1], args[2]
-
-        if vocab_size is None:
-            vocab_size = kwargs.get("vocab_size", 7736)
-
-        # Harmonize d_model
-        if embed_size is not None and embed_size != 300:
-            d_model = embed_size
 
         self.vocab_size = vocab_size
         self.d_model = d_model
@@ -59,6 +39,9 @@ class CaptionModel(nn.Module):
             dropout=dropout,
             tie_weights=tie_weights,
         )
+
+        if train_backbone:
+            self.encoder.unfreeze_backbone()
 
     def forward(self, images, captions, lengths=None):
         """Forward pass for teacher-forcing training.

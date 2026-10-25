@@ -3,7 +3,7 @@
 import torch
 from PIL import Image
 
-from src.utils import load_vocab, load_config
+from src.utils import load_checkpoint, load_vocab, load_config
 from src.transform import get_eval_transform
 from src.model import CaptionModel
 
@@ -14,21 +14,17 @@ def load_model(config, config_dir):
     vocab = load_vocab(config_dir / config["paths"]["vocab"])
 
     checkpoint_path = config_dir / config["paths"]["checkpoint"]
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    except TypeError:  # Compatibility with older PyTorch versions.
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = load_checkpoint(checkpoint_path, map_location=device)
 
-    # Checkpoint dimensions must match its saved weights, even if config changed later.
-    saved_config = checkpoint.get("model_config") or config["model"]
+    saved_config = checkpoint["model_config"]
     model_kwargs = {
-        "vocab_size": saved_config.get("vocab_size", len(vocab)),
-        "d_model": saved_config.get("d_model", saved_config.get("embed_size", 512)),
-        "nhead": saved_config.get("nhead", 8),
-        "num_decoder_layers": saved_config.get("num_decoder_layers", 3),
-        "dim_feedforward": saved_config.get("dim_feedforward", 2048),
-        "dropout": saved_config.get("dropout", 0.1),
-        "tie_weights": saved_config.get("tie_weights", True),
+        "vocab_size": saved_config["vocab_size"],
+        "d_model": saved_config["d_model"],
+        "nhead": saved_config["nhead"],
+        "num_decoder_layers": saved_config["num_decoder_layers"],
+        "dim_feedforward": saved_config["dim_feedforward"],
+        "dropout": saved_config["dropout"],
+        "tie_weights": saved_config["tie_weights"],
     }
     model = CaptionModel(**model_kwargs).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])

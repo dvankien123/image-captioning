@@ -5,7 +5,7 @@ from torch import nn
 from torchvision import models
 
 
-class ViTEncoder(nn.Module):
+class Encoder(nn.Module):
     """Vision Transformer (ViT-B/16) image encoder.
 
     Extracts sequence of patch tokens from an image:
@@ -42,24 +42,26 @@ class ViTEncoder(nn.Module):
             features (torch.Tensor): (batch_size, 197, d_model)
         """
         # Backbone is completely frozen, run with torch.no_grad() for speed and memory saving
-        with torch.no_grad():
+        if not any(param.requires_grad for param in self.encoder.layers[-1].parameters()):
+            with torch.no_grad():
+                x = self.conv_proj(images)  # (B, 768, 14, 14)
+                x = x.flatten(2).transpose(1, 2)  # (B, 196, 768)
+                batch_class_token = self.class_token.expand(x.shape[0], -1, -1)
+                x = torch.cat([batch_class_token, x], dim=1)  # (B, 197, 768)
+                features = self.encoder(x)  # (B, 197, 768)
+        else:
             x = self.conv_proj(images)  # (B, 768, 14, 14)
             x = x.flatten(2).transpose(1, 2)  # (B, 196, 768)
             batch_class_token = self.class_token.expand(x.shape[0], -1, -1)
             x = torch.cat([batch_class_token, x], dim=1)  # (B, 197, 768)
-            features = self.encoder(x)  # (B, 197, 768)
+            features = self.encoder(x)  # (B, 197, 768
 
         # Project to decoder dimension d_model (trainable projection layer)
         features = self.proj(features)  # (B, 197, d_model)
         return features
-
+    
     def unfreeze_backbone(self, num_layers=2):
-        """Optional fine-tuning helper (retained for backward compatibility)."""
         for param in self.encoder.layers[-num_layers:].parameters():
             param.requires_grad = True
         for param in self.encoder.ln.parameters():
             param.requires_grad = True
-
-
-# Backward compatibility alias
-Encoder = ViTEncoder

@@ -39,14 +39,11 @@ def save_checkpoint(
 
 
 def load_checkpoint(path, map_location=None):
-    """Load a PyTorch checkpoint file safely across versions."""
+    """Load a PyTorch checkpoint file."""
     path = Path(path).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"Checkpoint file not found: {path}")
-    try:
-        return torch.load(path, map_location=map_location, weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location=map_location)
+    return torch.load(path, map_location=map_location, weights_only=False)
 
 
 class EarlyStopping:
@@ -76,11 +73,9 @@ class EarlyStopping:
         }
 
     def load_state_dict(self, state_dict):
-        if not state_dict:
-            return
-        self.best_loss = state_dict.get("best_loss", float("inf"))
-        self.counter = state_dict.get("counter", 0)
-        self.should_stop = state_dict.get("should_stop", False)
+        self.best_loss = state_dict["best_loss"]
+        self.counter = state_dict["counter"]
+        self.should_stop = state_dict["should_stop"]
 
 
 def save_vocab(vocab):
@@ -170,7 +165,4 @@ def load_embedding_matrix(path=None):
     if not path.is_file():
         raise FileNotFoundError(f"Embedding matrix file not found: {path}")
 
-    try:
-        return torch.load(path, map_location="cpu", weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location="cpu")
+    return torch.load(path, map_location="cpu", weights_only=False)

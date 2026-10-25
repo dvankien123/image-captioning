@@ -83,9 +83,6 @@ def main(config, config_dir, resume: bool = False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    if not resume:
-        resume = config.get("train", {}).get("resume", False)
-
     vocab = load_vocab(config_dir / config["paths"]["vocab"])
     print(f"Vocab size: {len(vocab)}")
 
@@ -120,18 +117,18 @@ def main(config, config_dir, resume: bool = False):
     )
 
     model_config = {
-        "d_model": config["model"].get("d_model", 512),
-        "nhead": config["model"].get("nhead", 8),
-        "num_decoder_layers": config["model"].get("num_decoder_layers", 3),
-        "dim_feedforward": config["model"].get("dim_feedforward", 2048),
-        "dropout": config["model"].get("dropout", 0.1),
-        "tie_weights": config["model"].get("tie_weights", True),
+        "d_model": config["model"]["d_model"],
+        "nhead": config["model"]["nhead"],
+        "num_decoder_layers": config["model"]["num_decoder_layers"],
+        "dim_feedforward": config["model"]["dim_feedforward"],
+        "dropout": config["model"]["dropout"],
+        "tie_weights": config["model"]["tie_weights"],
+        "train_backbone": config["model"]["train_backbone"],
         "vocab_size": len(vocab),
     }
 
     model = CaptionModel(**model_config).to(device)
 
-    # ViT backbone is completely frozen; optimize only trainable parameters
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.Adam(trainable_params, lr=config["train"]["lr"])
 
@@ -163,22 +160,13 @@ def main(config, config_dir, resume: bool = False):
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-        if "scheduler_state_dict" in checkpoint and checkpoint["scheduler_state_dict"] is not None:
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        early_stopping.load_state_dict(checkpoint["early_stopping_state"])
+        early_stopping.should_stop = False
 
-        if "early_stopping_state" in checkpoint:
-            early_stopping.load_state_dict(checkpoint["early_stopping_state"])
-            early_stopping.should_stop = False
-        elif best_checkpoint_path.is_file():
-            try:
-                best_cp = load_checkpoint(best_checkpoint_path, map_location="cpu")
-                early_stopping.best_loss = best_cp.get("val_loss", float("inf"))
-            except Exception:
-                pass
-
-        start_epoch = checkpoint.get("epoch", 0)
+        start_epoch = checkpoint["epoch"]
         print(
-            f"Resumed at epoch {start_epoch} (val_loss={checkpoint.get('val_loss', 'N/A')}). "
+            f"Resumed at epoch {start_epoch} (val_loss={checkpoint['val_loss']}). "
             f"Training will continue from epoch {start_epoch + 1}."
         )
     else:
