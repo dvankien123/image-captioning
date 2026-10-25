@@ -20,10 +20,11 @@ model:
   num_decoder_layers: 3     # Số tầng Transformer Decoder (theo yêu cầu: 3 tầng)
   dim_feedforward: 2048     # Chiều tầng ẩn FFN bên trong Transformer
   dropout: 0.1              # Dropout rate chuẩn cho Transformer
-  train_backbone: false     # Đóng băng hoàn toàn ViT backbone
+  train_backbone: true     # Đóng băng hoàn toàn ViT backbone
   tie_weights: true         # Chia sẻ trọng số giữa embedding và fc output layer
 
 train:
+  resume: false
   seed: 42
   batch_size: 64
   lr: 0.0003
