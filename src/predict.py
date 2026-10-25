@@ -3,9 +3,10 @@
 import torch
 from PIL import Image
 
-from src.utils import load_vocab, load_config
+from src.utils import load_checkpoint, load_vocab, load_config
 from src.transform import get_eval_transform
 from src.model import CaptionModel
+
 
 def load_model(config, config_dir):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -13,21 +14,19 @@ def load_model(config, config_dir):
     vocab = load_vocab(config_dir / config["paths"]["vocab"])
 
     checkpoint_path = config_dir / config["paths"]["checkpoint"]
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    except TypeError:  # Compatibility with older PyTorch versions.
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = load_checkpoint(checkpoint_path, map_location=device)
 
-    # Checkpoint dimensions must match its saved weights, even if config changed later.
-    saved_config = checkpoint.get("model_config") or config["model"]
-    model = CaptionModel(
-        embed_size=saved_config["embed_size"],
-        hidden_size=saved_config["hidden_size"],
-        vocab_size=saved_config.get("vocab_size", len(vocab)),
-        attention_dim=saved_config.get("attention_dim", config["model"].get("attention_dim", 512)),
-        encoder_dim=saved_config.get("encoder_dim", config["model"].get("encoder_dim", 2048)),
-        dropout=saved_config.get("dropout", 0.5),
-    ).to(device)
+    saved_config = checkpoint["model_config"]
+    model_kwargs = {
+        "vocab_size": saved_config["vocab_size"],
+        "d_model": saved_config["d_model"],
+        "nhead": saved_config["nhead"],
+        "num_decoder_layers": saved_config["num_decoder_layers"],
+        "dim_feedforward": saved_config["dim_feedforward"],
+        "dropout": saved_config["dropout"],
+        "tie_weights": saved_config["tie_weights"],
+    }
+    model = CaptionModel(**model_kwargs).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
@@ -35,8 +34,18 @@ def load_model(config, config_dir):
 
     return model, vocab, transform, device
 
-def image_caption(image_input, model, vocab,
-                  transform, device, maxlen=30, method="beam", beam_size=3):
+
+def image_caption(
+    image_input,
+    model,
+    vocab,
+    transform,
+    device,
+    maxlen=30,
+    method="beam",
+    beam_size=3,
+    return_alphas=False,
+):
     if isinstance(image_input, str):
         raw_image = Image.open(image_input).convert("RGB")
     else:
@@ -51,4 +60,6 @@ def image_caption(image_input, model, vocab,
             method=method,
             beam_size=beam_size,
         )
-    return res, alphas
+    if return_alphas:
+        return res, alphas
+    return res
