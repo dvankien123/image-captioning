@@ -16,6 +16,8 @@ data/splits/*
 checkpoints/*
 !checkpoints/.gitkeep
 
+# Keep datasets, IDE state, and notebook checkpoints out of Git
+data/raw/
 .idea/
 .vscode/
 .codex/
