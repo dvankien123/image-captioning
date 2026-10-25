@@ -5,8 +5,8 @@ paths:
   val_json: data/splits/val.json
   test_json: data/splits/test.json
   vocab: data/processed/vocab.pickle
-  checkpoint: checkpoints/best_model.pth
-  last_checkpoint: checkpoints/last_checkpoint.pth
+  checkpoint: /content/drive/My Drive/image-captioning/checkpoints/best_model.pth
+  last_checkpoint: /content/drive/My Drive/image-captioning/checkpoints/last_checkpoint.pth
 
 data:
   freq_threshold: 5        # từ xuất hiện < 5 lần -> <unk>
