@@ -1,7 +1,8 @@
 import base64
 import importlib
-from io import BytesIO
+import math
 import sys
+from io import BytesIO
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
@@ -10,45 +11,20 @@ from backend.core.config import PROJECT_ROOT, settings
 
 
 class CaptionModelService:
-    """Loads and runs the trained image-captioning model from the model directory."""
+    """Loads the configured ViT model, falling back to the local ResNet-LSTM."""
 
     def __init__(self):
         self.model = None
         self.vocab = None
         self.device = None
         self.transform = None
+        self.beam_search = None
+        self.model_name = None
+        self.supports_attention = False
 
-    def load(self):
-        self.model = None
-        self.vocab = None
-        self.device = None
-        self.transform = None
-
-        checkpoint_path = Path(settings.MODEL_CHECKPOINT).expanduser()
-        if not checkpoint_path.is_absolute():
-            checkpoint_path = PROJECT_ROOT / checkpoint_path
-        if not checkpoint_path.is_file():
-            raise FileNotFoundError(
-                f"Model checkpoint not found: {checkpoint_path}. "
-                "Place best_model.pth in model/checkpoints or set MODEL_CHECKPOINT."
-            )
-
-        import torch
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        model_root_path = PROJECT_ROOT / "model"
-        model_src_path = model_root_path / "src"
-        if not model_src_path.is_dir():
-            raise FileNotFoundError(f"Model source directory not found: {model_src_path}")
-
-        model_root = str(model_root_path)
-        if model_root not in sys.path:
-            sys.path.insert(0, model_root)
-        importlib.invalidate_caches()
-
-        # The repository also has a top-level `src` directory. Pin this package
-        # to model/src so checkpoint imports and model imports cannot mix files.
+    @staticmethod
+    def _activate_model_sources(model_src_path: Path):
+        """Bind `src.*` imports to one model directory without cross-contamination."""
         for module_name in tuple(sys.modules):
             if module_name == "src" or module_name.startswith("src."):
                 del sys.modules[module_name]
@@ -56,32 +32,136 @@ class CaptionModelService:
         model_package.__path__ = [str(model_src_path)]
         model_package.__package__ = "src"
         sys.modules["src"] = model_package
+        importlib.invalidate_caches()
+        return importlib.import_module("src.vocabulary").Vocabulary
 
-        CaptionModel = importlib.import_module("src.model").CaptionModel
-        get_eval_transform = importlib.import_module("src.transform").get_eval_transform
-        Vocabulary = importlib.import_module("src.vocabulary").Vocabulary
+    def load(self):
+        self.unload()
 
-        # Avoid executing arbitrary pickle globals; the checkpoint only needs
-        # its project Vocabulary class in addition to PyTorch tensors.
+        checkpoint_path = Path(settings.MODEL_CHECKPOINT).expanduser()
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = PROJECT_ROOT / checkpoint_path
+        model_root_path = PROJECT_ROOT / "model_vit"
+        model_src_path = model_root_path / "src"
+        import torch
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        legacy_checkpoint_path = PROJECT_ROOT / "model" / "checkpoints" / "best_model.pth"
+
+        if checkpoint_path.is_file():
+            model, vocab, transform, beam_search = self._load_vit(
+                checkpoint_path, model_src_path, device, torch
+            )
+            model_name = "ViT-B/16 + Transformer"
+            supports_attention = True
+        elif legacy_checkpoint_path.is_file():
+            model, vocab, transform, beam_search = self._load_legacy(
+                legacy_checkpoint_path, device, torch
+            )
+            model_name = "ResNet-50 + LSTM (local fallback)"
+            supports_attention = False
+        else:
+            raise FileNotFoundError(
+                f"Không tìm thấy checkpoint ViT: {checkpoint_path}; "
+                f"cũng không có checkpoint dự phòng: {legacy_checkpoint_path}."
+            )
+
+        self.model = model
+        self.vocab = vocab
+        self.device = device
+        self.transform = transform
+        self.beam_search = beam_search
+        self.model_name = model_name
+        self.supports_attention = supports_attention
+
+    def _load_checkpoint(self, checkpoint_path: Path, source_path: Path, torch):
+        if not source_path.is_dir():
+            raise FileNotFoundError(f"Model source directory not found: {source_path}")
+        Vocabulary = self._activate_model_sources(source_path)
         with torch.serialization.safe_globals([Vocabulary]):
             checkpoint = torch.load(
                 checkpoint_path,
                 map_location="cpu",
                 weights_only=True,
             )
+        if not isinstance(checkpoint, dict):
+            raise ValueError(f"Checkpoint không hợp lệ: {checkpoint_path}")
+        if checkpoint.get("vocab") is None or checkpoint.get("model_state_dict") is None:
+            raise ValueError("Checkpoint phải có model_state_dict và vocab.")
+        return checkpoint, checkpoint["vocab"]
+
+    def _load_vit(self, checkpoint_path: Path, model_src_path: Path, device, torch):
+        checkpoint, vocab = self._load_checkpoint(checkpoint_path, model_src_path, torch)
+        CaptionModel = importlib.import_module("src.model").CaptionModel
+        get_eval_transform = importlib.import_module("src.transform").get_eval_transform
+        beam_search = importlib.import_module("src.beam_search").beam_search
+
         model_config = checkpoint.get("model_config")
-        vocab = checkpoint.get("vocab")
         model_state_dict = checkpoint.get("model_state_dict")
-        if not model_config or vocab is None or model_state_dict is None:
+        if not isinstance(model_config, dict) or vocab is None or model_state_dict is None:
             raise ValueError(
                 "Checkpoint must contain 'model_config', 'model_state_dict', and 'vocab'."
             )
 
+        required_config = {
+            "d_model",
+            "nhead",
+            "num_decoder_layers",
+            "dim_feedforward",
+            "dropout",
+            "tie_weights",
+            "vocab_size",
+        }
+        missing_config = sorted(required_config.difference(model_config))
+        if missing_config:
+            raise ValueError(
+                "Checkpoint is not from the ViT-Transformer model on main "
+                f"(missing model_config fields: {', '.join(missing_config)}). "
+                "The existing ResNet-LSTM checkpoint is not compatible."
+            )
+
         model_config = dict(model_config)
         model_config["vocab_size"] = len(vocab)
-        # The model source requests ImageNet weights in its constructor, but
-        # the checkpoint already contains the trained encoder weights. Bypass
-        # that download and load the checkpoint directly.
+
+        # Encoder defaults to ImageNet weights. The checkpoint already contains
+        # the trained ViT, so avoid a network download during backend startup.
+        import torchvision.models as torchvision_models
+
+        vit_b_16 = torchvision_models.vit_b_16
+
+        def vit_b_16_without_pretrained_weights(*args, **kwargs):
+            kwargs["weights"] = None
+            kwargs.pop("pretrained", None)
+            return vit_b_16(*args, **kwargs)
+
+        with patch.object(
+            torchvision_models,
+            "vit_b_16",
+            new=vit_b_16_without_pretrained_weights,
+        ):
+            model = CaptionModel(**model_config)
+
+        model.load_state_dict(model_state_dict)
+        model.to(device)
+        model.eval()
+        transform = get_eval_transform(settings.IMAGE_SIZE)
+        return model, vocab, transform, beam_search
+
+    def _load_legacy(self, checkpoint_path: Path, device, torch):
+        source_path = PROJECT_ROOT / "model" / "src"
+        checkpoint, vocab = self._load_checkpoint(checkpoint_path, source_path, torch)
+        model_config = checkpoint.get("model_config")
+        if not isinstance(model_config, dict):
+            raise ValueError("ResNet-LSTM checkpoint thiếu model_config.")
+        required = {"embed_size", "hidden_size", "vocab_size"}
+        missing = sorted(required.difference(model_config))
+        if missing:
+            raise ValueError(
+                "ResNet-LSTM checkpoint thiếu cấu hình: " + ", ".join(missing)
+            )
+
+        CaptionModel = importlib.import_module("src.model").CaptionModel
+        get_eval_transform = importlib.import_module("src.transform").get_eval_transform
         import torchvision.models as torchvision_models
 
         resnet50 = torchvision_models.resnet50
@@ -92,60 +172,68 @@ class CaptionModelService:
             return resnet50(*args, **kwargs)
 
         with patch.object(
-            torchvision_models,
-            "resnet50",
-            new=resnet50_without_pretrained_weights,
+            torchvision_models, "resnet50", new=resnet50_without_pretrained_weights
         ):
             model = CaptionModel(**model_config)
-
-        model.load_state_dict(model_state_dict)
-        model.to(self.device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.to(device)
         model.eval()
         transform = get_eval_transform(settings.IMAGE_SIZE)
-
-        self.model = model
-        self.vocab = vocab
-        self.transform = transform
+        return model, vocab, transform, None
 
     def unload(self):
         using_cuda = self.device is not None and self.device.type == "cuda"
         self.model = None
         self.vocab = None
         self.transform = None
+        self.beam_search = None
         self.device = None
+        self.model_name = None
+        self.supports_attention = False
         if using_cuda:
             import torch
 
             torch.cuda.empty_cache()
 
-    def predict(self, image_path: str) -> str:
-        import torch
+    def _attention_overlay(self, cropped_image, attention):
+        import numpy as np
         from PIL import Image
 
-        if self.model is None or self.vocab is None or self.transform is None:
-            raise RuntimeError("Caption model is not loaded.")
+        weights = np.nan_to_num(
+            np.array(attention, dtype=np.float32, copy=True).reshape(-1),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        patch_count = weights.size - 1
+        grid_size = math.isqrt(patch_count)
+        if grid_size * grid_size == patch_count:
+            weights = weights[1:]  # Drop ViT's class token; it has no image patch.
+        else:
+            grid_size = math.isqrt(weights.size)
+            if grid_size * grid_size != weights.size:
+                raise RuntimeError(
+                    f"Unexpected ViT attention size: {weights.size} tokens."
+                )
 
-        with Image.open(image_path) as source:
-            image = source.convert("RGB")
-            tensor = self.transform(image).unsqueeze(0).to(self.device)
+        weights = np.maximum(weights.reshape(grid_size, grid_size), 0.0)
+        total = float(weights.sum())
+        if total > 1e-8:
+            weights /= total
+        else:
+            weights.fill(0.0)
 
-        with torch.inference_mode():
-            features = self.model.encoder(tensor)
-            token_batches = self.model.decoder.sample(
-                features, max_len=settings.MAX_CAPTION_LENGTH
-            )
-
-        words = []
-        for token_id in token_batches[0]:
-            if token_id == self.vocab.word2idx.get("<end>", 2):
-                break
-            if token_id in (
-                self.vocab.word2idx.get("<pad>", 0),
-                self.vocab.word2idx.get("<start>", 1),
-            ):
-                continue
-            words.append(self.vocab.idx2word.get(token_id, "<unk>"))
-        return " ".join(words).strip()
+        heatmap = Image.fromarray(
+            np.uint8(np.clip(weights * 255.0, 0.0, 255.0))
+        ).resize(cropped_image.size, Image.Resampling.BICUBIC)
+        colors = Image.fromarray(
+            self._jet_colorize(np.asarray(heatmap, dtype=np.float32) / 255.0)
+        )
+        overlay = Image.blend(cropped_image, colors, alpha=0.45)
+        buffer = BytesIO()
+        overlay.save(buffer, format="JPEG", quality=75)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
 
     @staticmethod
     def _jet_colorize(heatmap):
@@ -159,123 +247,108 @@ class CaptionModelService:
         rgb = np.stack((red, green, blue), axis=-1)
         return (rgb * 255).astype(np.uint8)
 
-    def _attention_overlay(self, cropped_image, heatmap):
-        import numpy as np
-        from PIL import Image
-
-        heatmap = np.nan_to_num(
-            np.array(heatmap, dtype=np.float32, copy=True),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-        heatmap -= heatmap.min()
-        maximum = float(heatmap.max())
-        if maximum > 1e-8:
-            heatmap /= maximum
-        else:
-            heatmap.fill(0)
-
-        colors = Image.fromarray(self._jet_colorize(heatmap))
-        overlay = Image.blend(cropped_image, colors, alpha=0.45)
-        buffer = BytesIO()
-        overlay.save(buffer, format="JPEG", quality=68)
-        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-        return f"data:image/jpeg;base64,{encoded}"
-
-    def predict_with_attention(self, image_path: str) -> tuple[str, list[dict[str, str]]]:
-        """Generate a caption and post-hoc Grad-CAM maps for each decoder step.
-
-        The model has no spatial attention layer. This computes token-conditioned
-        Grad-CAM from ResNet layer4 without changing model code or weights. It is
-        intentionally opt-in because gradients and overlay encoding cost more
-        than normal caption inference.
-        """
+    def _predict(self, image_path: str, with_attention: bool):
         import torch
-        import torch.nn.functional as functional
         from PIL import Image
         from torchvision.transforms import CenterCrop, Resize
 
-        if self.model is None or self.vocab is None or self.transform is None:
+        if (
+            self.model is None
+            or self.vocab is None
+            or self.transform is None
+        ):
             raise RuntimeError("Caption model is not loaded.")
 
-        with torch.inference_mode(False):
-            with Image.open(image_path) as source:
-                image = source.convert("RGB")
-                tensor = self.transform(image).unsqueeze(0).to(self.device)
-                # Reuse one cropped preview for every per-token overlay.
-                cropped_image = CenterCrop(settings.IMAGE_SIZE)(Resize(256)(image))
+        with Image.open(image_path) as source:
+            image = source.convert("RGB")
+            tensor = self.transform(image).unsqueeze(0).to(self.device)
+            cropped_image = (
+                CenterCrop(settings.IMAGE_SIZE)(Resize(256)(image))
+                if with_attention
+                else None
+            )
 
-            encoder = self.model.encoder
-            decoder = self.model.decoder
-            backbone = encoder.backbone
-            if len(backbone) < 2:
-                raise RuntimeError("Encoder backbone does not expose a spatial feature layer.")
-
-            # Run the expensive, frozen CNN once. Use the layer4 feature grid
-            # before ResNet's global average pool to retain spatial resolution.
-            with torch.no_grad():
-                spatial = backbone[:-1](tensor)
-            spatial = spatial.detach().requires_grad_(True)
-
-            # cuDNN's fused LSTM does not implement backward in eval mode.
-            # Keep the model in eval mode (stable BatchNorm/dropout behavior)
-            # and use PyTorch's native RNN path for this opt-in gradient pass.
-            with torch.enable_grad(), torch.backends.cudnn.flags(enabled=False):
-                pooled = backbone[-1](spatial).flatten(1)
-                features = encoder.bn(encoder.fc(pooled))
-                inputs = features.unsqueeze(1)
-                states = None
-                start_id = self.vocab.word2idx.get("<start>", 1)
-                end_id = self.vocab.word2idx.get("<end>", 2)
-                pad_id = self.vocab.word2idx.get("<pad>", 0)
-                context_token = start_id
-                words = []
-                attention_steps = []
-
-                for _ in range(settings.MAX_CAPTION_LENGTH):
-                    hiddens, states = decoder.lstm(inputs, states)
-                    logits = decoder.fc(hiddens.squeeze(1))
-                    predicted = logits.argmax(dim=1)
-                    token_id = int(predicted.item())
-
-                    if token_id == end_id:
-                        break
-
-                    # The map explains the decoder's current context token:
-                    # <start> for the first prediction, then each emitted word.
-                    score = logits[0, token_id]
-                    gradients = torch.autograd.grad(
-                        score,
-                        spatial,
-                        retain_graph=True,
-                        create_graph=False,
-                    )[0]
-                    channel_weights = gradients.mean(dim=(2, 3), keepdim=True)
-                    cam = torch.relu((channel_weights * spatial).sum(dim=1, keepdim=True))
-                    cam = functional.interpolate(
-                        cam,
-                        size=(settings.IMAGE_SIZE, settings.IMAGE_SIZE),
-                        mode="bilinear",
-                        align_corners=False,
-                    )[0, 0]
-                    heatmap = cam.detach().float().cpu().numpy()
-                    label = self.vocab.idx2word.get(context_token, "<unk>")
-                    attention_steps.append(
-                        {
-                            "word": label,
-                            "image": self._attention_overlay(cropped_image, heatmap),
-                        }
+        with torch.inference_mode():
+            features = self.model.encoder(tensor)
+            if self.beam_search is not None and settings.DECODING_METHOD == "beam":
+                result = self.beam_search(
+                    self.model.decoder,
+                    features,
+                    self.vocab,
+                    beam_size=settings.BEAM_SIZE,
+                    max_len=settings.MAX_CAPTION_LENGTH,
+                    length_penalty_alpha=settings.BEAM_LENGTH_PENALTY_ALPHA,
+                    return_alphas=with_attention,
+                )
+                if with_attention:
+                    token_ids, attention = result
+                    attention_rows = list(attention)
+                else:
+                    token_ids = result
+                    attention_rows = []
+            else:
+                if self.beam_search is None:
+                    token_batches = self.model.decoder.sample(
+                        features,
+                        max_len=settings.MAX_CAPTION_LENGTH,
                     )
+                    token_ids = token_batches[0]
+                    attention_rows = []
+                elif with_attention and self.supports_attention:
+                    token_batches, attention_batches = self.model.decoder.sample(
+                        features,
+                        max_len=settings.MAX_CAPTION_LENGTH,
+                        return_alphas=True,
+                    )
+                    token_ids = token_batches[0]
+                    attention_rows = list(attention_batches[0])
+                else:
+                    token_batches = self.model.decoder.sample(
+                        features,
+                        max_len=settings.MAX_CAPTION_LENGTH,
+                        return_alphas=False,
+                    )
+                    token_ids = token_batches[0]
+                    attention_rows = []
 
-                    if token_id not in (pad_id, start_id):
-                        token_word = self.vocab.idx2word.get(token_id, "<unk>")
-                        words.append(token_word)
-                    context_token = token_id
-                    inputs = decoder.embed(predicted).unsqueeze(1)
+        words = []
+        token_attention = []
+        end_id = self.vocab.word2idx["<end>"]
+        excluded_ids = {
+            self.vocab.word2idx["<pad>"],
+            self.vocab.word2idx["<start>"],
+            end_id,
+        }
+        for index, token_id in enumerate(token_ids):
+            token_id = int(token_id)
+            if token_id == end_id:
+                break
+            if token_id in excluded_ids:
+                continue
+            words.append(self.vocab.idx2word.get(token_id, "<unk>"))
+            if with_attention and self.supports_attention and index < len(attention_rows):
+                token_attention.append(attention_rows[index])
 
-                caption = " ".join(words).strip()
-                return caption, attention_steps
+        caption = " ".join(words).strip()
+        if not with_attention or not self.supports_attention or cropped_image is None:
+            return caption, []
+
+        steps = [
+            {
+                "word": word,
+                "image": self._attention_overlay(cropped_image, weights),
+            }
+            for word, weights in zip(words, token_attention)
+        ]
+        return caption, steps
+
+    def predict(self, image_path: str) -> str:
+        caption, _ = self._predict(image_path, with_attention=False)
+        return caption
+
+    def predict_with_attention(self, image_path: str) -> tuple[str, list[dict[str, str]]]:
+        """Generate a caption with the ViT-Transformer's visual cross-attention."""
+        return self._predict(image_path, with_attention=True)
 
 
 caption_model_service = CaptionModelService()
