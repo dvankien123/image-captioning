@@ -224,12 +224,20 @@ class SmoothThumbnailLabel(QLabel):
         painter.setClipPath(path)
 
         if self._pixmap and not self._pixmap.isNull():
-            w = rect.width() * self._zoom
-            h = rect.height() * self._zoom
-            x = (rect.width() - w) / 2.0
-            y = (rect.height() - h) / 2.0
+            pw = self._pixmap.width()
+            ph = self._pixmap.height()
+            rw = rect.width() * self._zoom
+            rh = rect.height() * self._zoom
+
+            # Scale preserving aspect ratio (center-crop fill) so image is never squished
+            scale = max(rw / max(1, pw), rh / max(1, ph))
+            draw_w = pw * scale
+            draw_h = ph * scale
+            draw_x = (rect.width() - draw_w) / 2.0
+            draw_y = (rect.height() - draw_h) / 2.0
+
             painter.drawPixmap(
-                QRectF(x, y, w, h),
+                QRectF(draw_x, draw_y, draw_w, draw_h),
                 self._pixmap,
                 QRectF(self._pixmap.rect()),
             )

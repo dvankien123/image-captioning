@@ -283,9 +283,14 @@ class MainWindow(QMainWindow):
         self.attentions_view.set_content(caption, steps)
 
     def _on_inference_failed(self, error_message: str):
-        """Fallback to demo data matching the design mockups."""
-        fallback = self.backend_client.generate_mock_result(self._current_file_path or "")
-        self._on_inference_finished(fallback)
+        """Fallback to demo data matching the design mockups if offline, or display server error."""
+        if any(keyword in error_message.lower() for keyword in ("connect", "offline", "unavailable", "refused")):
+            fallback = self.backend_client.generate_mock_result(self._current_file_path or "")
+            self._on_inference_finished(fallback)
+        else:
+            if self._current_pixmap:
+                self.caption_view.set_content(self._current_pixmap, f"Error: {error_message}")
+            self.attentions_view.clear()
 
     def _open_attention_modal(self, word: str, pixmap: QPixmap, index: int, all_steps: list):
         """Open the Attention modal dialog matching Image 4."""

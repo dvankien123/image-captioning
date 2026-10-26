@@ -2,10 +2,9 @@
 
 Handles:
 - Backend health check (/health) and readiness check (/ready)
-- Image upload and caption inference with Grad-CAM attention (/api/upload)
-- Graceful demo/fallback simulation when backend model is not loaded (HTTP 503)
-  or backend server is offline, enabling full visual inspection of the UI
-  according to the design images.
+- Image upload and caption inference with ViT cross-attention (/api/upload)
+- Direct in-process ViT model inference fallback when HTTP backend is offline
+- Graceful demo/fallback simulation when model checkpoint is not loaded
 """
 
 from __future__ import annotations
@@ -23,10 +22,27 @@ import numpy as np
 
 
 class BackendClient:
-    """HTTP client communicating with the FastAPI image captioning backend."""
+    """HTTP client communicating with the FastAPI image captioning backend,
+    with direct in-process model inference fallback when backend server is offline."""
 
     def __init__(self, base_url: str = "http://127.0.0.1:8000"):
         self.base_url = base_url.rstrip("/")
+        self._direct_service = None
+        # Pre-warm model in background so inference is instant
+        import threading
+        threading.Thread(target=self._get_direct_service, daemon=True).start()
+
+    def _get_direct_service(self):
+        """Lazy-load the in-process model service if HTTP backend is offline."""
+        if self._direct_service is None:
+            try:
+                from backend.services.model_service import caption_model_service
+                if caption_model_service.model is None:
+                    caption_model_service.load()
+                self._direct_service = caption_model_service
+            except Exception:
+                self._direct_service = False
+        return self._direct_service if self._direct_service is not False else None
 
     def check_health(self) -> Tuple[bool, str]:
         """Check if backend server is responsive."""
@@ -61,22 +77,27 @@ class BackendClient:
     ) -> Dict[str, Any]:
         """Upload an image to the backend.
 
-        If the backend is offline or model is not loaded (503 Service Unavailable),
-        generates a realistic sample matching the design mockups so that UI
-        evaluation and visual testing function seamlessly.
+        1. Attempts HTTP backend (/api/upload).
+        2. If HTTP backend is not running, runs the real ViT model directly in-process!
+        3. If model checkpoint is unavailable, falls back to mock demo.
         """
         p = Path(file_path)
         if not p.is_file():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Attempt real API call first
-        mime, _ = mimetypes.guess_type(str(p))
-        if not mime:
-            mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+        # Accurately resolve MIME type (especially on Windows where .webp might not be registered)
+        ext = p.suffix.lower()
+        if ext in {".webp", ".webg"}:
+            mime = "image/webp"
+        elif ext == ".png":
+            mime = "image/png"
+        else:
+            mime = "image/jpeg"
 
+        # 1. Attempt real HTTP API call first
         backend_available = False
         try:
-            with httpx.Client(timeout=5.0) as quick_client:
+            with httpx.Client(timeout=2.0) as quick_client:
                 health_res = quick_client.get(f"{self.base_url}/health")
                 backend_available = health_res.status_code == 200
         except Exception:
@@ -98,11 +119,46 @@ class BackendClient:
                 if resp.status_code == 200:
                     payload = resp.json()
                     return payload.get("data", payload)
-                # If 503 (model checkpoint not loaded) or other known degraded state, fallback to mock
+
+                # If backend returned client error (400, 413, 429), raise so UI can report it
+                if resp.status_code in {400, 413, 422, 429}:
+                    err_msg = f"HTTP {resp.status_code}"
+                    try:
+                        err_data = resp.json()
+                        err_msg = err_data.get("detail", err_msg)
+                    except Exception:
+                        if resp.text:
+                            err_msg = resp.text
+                    raise RuntimeError(str(err_msg))
+
+                # If 503 (model checkpoint not loaded) or other known degraded state, fallback
+            except RuntimeError:
+                raise
             except Exception:
                 pass
 
-        # Fallback to realistic mock result matching the design images
+        # 2. If HTTP backend server is not running, run real ViT model directly in-process
+        direct_service = self._get_direct_service()
+        if direct_service is not None:
+            try:
+                if show_attention and direct_service.supports_attention:
+                    caption, steps = direct_service.predict_with_attention(str(p))
+                else:
+                    caption = direct_service.predict(str(p))
+                    steps = []
+                return {
+                    "id": 1,
+                    "original_filename": p.name,
+                    "caption": caption,
+                    "attention": {
+                        "method": "vit_cross_attention" if direct_service.supports_attention else "none",
+                        "steps": steps,
+                    },
+                }
+            except Exception:
+                pass
+
+        # 3. Fallback to realistic mock result matching the design images
         return self.generate_mock_result(file_path)
 
     @staticmethod

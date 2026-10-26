@@ -75,13 +75,7 @@ class AttentionCard(QFrame):
         layout.addWidget(self.word_lbl)
 
         # Heatmap thumbnail with smooth hover zoom & border micro-interaction
-        thumb_size = QSize(100, 68)
-        scaled = self.pixmap.scaled(
-            thumb_size,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
-        self.img_lbl = SmoothThumbnailLabel(scaled)
+        self.img_lbl = SmoothThumbnailLabel(self.pixmap)
         layout.addWidget(self.img_lbl)
 
     def enterEvent(self, event):

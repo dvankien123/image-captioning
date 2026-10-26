@@ -197,7 +197,7 @@ class CaptionModelService:
 
     def _attention_overlay(self, cropped_image, attention):
         import numpy as np
-        from PIL import Image
+        from PIL import Image, ImageFilter
 
         weights = np.nan_to_num(
             np.array(attention, dtype=np.float32, copy=True).reshape(-1),
@@ -217,21 +217,39 @@ class CaptionModelService:
                 )
 
         weights = np.maximum(weights.reshape(grid_size, grid_size), 0.0)
-        total = float(weights.sum())
-        if total > 1e-8:
-            weights /= total
+        w_min = float(weights.min())
+        w_max = float(weights.max())
+        w_mean = float(weights.mean())
+        contrast = (w_max - w_min) / (w_mean + 1e-8)
+
+        if w_max - w_min > 1e-8:
+            weights = (weights - w_min) / (w_max - w_min)
         else:
             weights.fill(0.0)
 
+        # Bicubic resize + Gaussian blur to eliminate 14x14 patch boundary artifacts
         heatmap = Image.fromarray(
             np.uint8(np.clip(weights * 255.0, 0.0, 255.0))
         ).resize(cropped_image.size, Image.Resampling.BICUBIC)
+        heatmap = heatmap.filter(ImageFilter.GaussianBlur(radius=6))
+
+        h_arr = np.asarray(heatmap, dtype=np.float32) / 255.0
         colors = Image.fromarray(
-            self._jet_colorize(np.asarray(heatmap, dtype=np.float32) / 255.0)
+            self._jet_colorize(h_arr)
         )
-        overlay = Image.blend(cropped_image, colors, alpha=0.45)
+
+        # Dynamic alpha blend: keep photo natural, only highlight hot regions
+        strength = min(1.0, max(0.25, contrast / 3.0))
+        alpha_mask = np.clip((h_arr - 0.20) / 0.65, 0.0, 1.0) * 0.58 * strength
+        alpha_3d = np.expand_dims(alpha_mask, axis=-1)
+
+        base_np = np.asarray(cropped_image.convert("RGB"), dtype=np.float32)
+        col_np = np.asarray(colors, dtype=np.float32)
+        blended = (base_np * (1.0 - alpha_3d) + col_np * alpha_3d).astype(np.uint8)
+        overlay = Image.fromarray(blended)
+
         buffer = BytesIO()
-        overlay.save(buffer, format="JPEG", quality=75)
+        overlay.save(buffer, format="JPEG", quality=85)
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
         return f"data:image/jpeg;base64,{encoded}"
 
