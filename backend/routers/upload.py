@@ -17,7 +17,12 @@ from backend.services.model_service import caption_model_service
 
 router = APIRouter()
 UPLOAD_DIR = Path(settings.UPLOAD_DIR)
-ALLOWED_TYPES = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png"}
+ALLOWED_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
 MAX_FILE_SIZE = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 
 
@@ -27,7 +32,11 @@ def _save_caption(filename: str, caption: str) -> dict:
         db.add(record)
         db.commit()
         db.refresh(record)
-        return {"id": record.id, "original_filename": record.filename, "caption": record.caption}
+        return {
+            "id": record.id,
+            "original_filename": record.filename,
+            "caption": record.caption,
+        }
 
 
 def _safe_filename(filename: str | None) -> str:
@@ -38,7 +47,12 @@ def _safe_filename(filename: str | None) -> str:
 
 def _validate_image(content: bytes, content_type: str) -> None:
     with Image.open(BytesIO(content)) as image:
-        expected_format = "JPEG" if content_type in {"image/jpeg", "image/jpg"} else "PNG"
+        expected_format = {
+            "image/jpeg": "JPEG",
+            "image/jpg": "JPEG",
+            "image/png": "PNG",
+            "image/webp": "WEBP",
+        }[content_type]
         if image.format != expected_format:
             raise ValueError("Image format does not match the declared content type.")
         if image.width * image.height > settings.MAX_IMAGE_PIXELS:
@@ -56,10 +70,16 @@ async def upload_image(
 
     if file.content_type not in ALLOWED_TYPES:
         await file.close()
-        raise HTTPException(status_code=400, detail="Vui lòng upload ảnh JPG hoặc PNG.")
+        raise HTTPException(
+            status_code=400,
+            detail="Vui lòng upload ảnh JPG, PNG hoặc WebP.",
+        )
     if not getattr(request.app.state, "model_ready", False):
         await file.close()
-        raise HTTPException(status_code=503, detail="Model chưa sẵn sàng. Hãy cấu hình checkpoint đã huấn luyện.")
+        raise HTTPException(
+            status_code=503,
+            detail="Model chưa sẵn sàng. Hãy cấu hình checkpoint đã huấn luyện.",
+        )
 
     if file.size is not None and file.size > MAX_FILE_SIZE:
         await file.close()
@@ -68,14 +88,23 @@ async def upload_image(
     try:
         content = await file.read(MAX_FILE_SIZE + 1)
         if len(content) > MAX_FILE_SIZE:
-            raise HTTPException(status_code=413, detail="Ảnh vượt quá dung lượng cho phép.")
+            raise HTTPException(
+                status_code=413,
+                detail="Ảnh vượt quá dung lượng cho phép.",
+            )
 
         try:
             await run_in_threadpool(_validate_image, content, file.content_type)
         except OverflowError as exc:
-            raise HTTPException(status_code=413, detail="Độ phân giải ảnh vượt quá giới hạn cho phép.") from exc
+            raise HTTPException(
+                status_code=413,
+                detail="Độ phân giải ảnh vượt quá giới hạn cho phép.",
+            ) from exc
         except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
-            raise HTTPException(status_code=400, detail="File ảnh không hợp lệ hoặc bị hỏng.") from exc
+            raise HTTPException(
+                status_code=400,
+                detail="File ảnh không hợp lệ hoặc bị hỏng.",
+            ) from exc
 
         await run_in_threadpool(UPLOAD_DIR.mkdir, parents=True, exist_ok=True)
         file_path = UPLOAD_DIR / f"{uuid.uuid4().hex}{ALLOWED_TYPES[file.content_type]}"
@@ -134,7 +163,9 @@ async def upload_image(
         )
         if show_attention:
             result["attention"] = {
-                "method": "gradcam",
+                "method": "vit_cross_attention"
+                if caption_model_service.supports_attention
+                else "unavailable_for_resnet_lstm",
                 "steps": attention_steps,
             }
         logger.info(

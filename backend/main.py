@@ -16,7 +16,9 @@ from backend.services.model_service import caption_model_service
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
-    app.state.inference_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_INFERENCES)
+    app.state.inference_semaphore = asyncio.Semaphore(
+        settings.MAX_CONCURRENT_INFERENCES
+    )
     app.state.model_ready = False
     try:
         await run_in_threadpool(caption_model_service.load)
@@ -58,7 +60,30 @@ async def readiness_check(request: Request):
             status_code=503,
             detail={
                 "status": "not_ready",
-                "reason": "Model checkpoint or model dependencies are unavailable.",
+                "reason": getattr(
+                    request.app.state,
+                    "model_error",
+                    "Model checkpoint or model dependencies are unavailable.",
+                ),
             },
         )
-    return {"status": "ready", "model_device": str(caption_model_service.device)}
+    return {
+        "status": "ready",
+        "model": caption_model_service.model_name,
+        "model_device": str(caption_model_service.device),
+        "decoding_method": (
+            settings.DECODING_METHOD if caption_model_service.beam_search else "greedy"
+        ),
+        "supports_attention": caption_model_service.supports_attention,
+    }
+
+
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "message": "Image Captioning API is running",
+        "health": "/health",
+        "readiness": "/ready",
+        "docs": "/docs",
+    }
