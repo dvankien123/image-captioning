@@ -1,4 +1,4 @@
-"""Image encoder and caption decoder with visual attention."""
+"""Vision Transformer (ViT) encoder and Transformer caption decoder with multi-head attention."""
 
 import torch
 import torch.nn as nn
@@ -9,35 +9,86 @@ from src.beam_search import beam_search
 
 
 class CaptionModel(nn.Module):
-    def __init__(self, embed_size, hidden_size, vocab_size,
-                 attention_dim=512, encoder_dim=2048, dropout=0.5,
-                 pretrained_embeddings=None, freeze_embedding=False):
+    """Full Image Captioning Model combining ViT-B/16 Encoder and Transformer Decoder."""
+
+    def __init__(
+        self,
+        vocab_size=None,
+        d_model=512,
+        nhead=8,
+        num_decoder_layers=3,
+        dim_feedforward=2048,
+        dropout=0.1,
+        tie_weights=True,
+        train_backbone=False
+    ):
         super().__init__()
-        self.encoder = Encoder()
+
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_decoder_layers = num_decoder_layers
+
+        self.encoder = Encoder(d_model=d_model)
         self.decoder = Decoder(
-            embed_size=embed_size,
-            hidden_size=hidden_size,
             vocab_size=vocab_size,
-            attention_dim=attention_dim,
-            encoder_dim=encoder_dim,
+            d_model=d_model,
+            nhead=nhead,
+            num_decoder_layers=num_decoder_layers,
+            dim_feedforward=dim_feedforward,
             dropout=dropout,
-            pretrained_embeddings=pretrained_embeddings,
-            freeze_embedding=freeze_embedding,
+            tie_weights=tie_weights,
         )
 
-    def forward(self, images, captions, lengths):
-        features = self.encoder(images)
+        if train_backbone:
+            self.encoder.unfreeze_backbone()
+
+    def forward(self, images, captions, lengths=None):
+        """Forward pass for teacher-forcing training.
+
+        Args:
+            images (torch.Tensor): (batch_size, 3, 224, 224)
+            captions (torch.Tensor): (batch_size, seq_len)
+            lengths (torch.Tensor, optional): (batch_size,)
+
+        Returns:
+            outputs (torch.Tensor): Logits (batch_size, seq_len - 1, vocab_size)
+            alphas (torch.Tensor): Cross-attention weights (batch_size, seq_len - 1, 197)
+        """
+        features = self.encoder(images)  # (B, 197, d_model)
         outputs, alphas = self.decoder(features, captions, lengths)
         return outputs, alphas
 
     @torch.no_grad()
-    def generate_caption(self, image, vocab, max_len=30,
-                         method="greedy", beam_size=3,
-                         length_penalty_alpha=0.6):
+    def generate_caption(
+        self,
+        image,
+        vocab,
+        max_len=30,
+        method="greedy",
+        beam_size=3,
+        length_penalty_alpha=0.6,
+    ):
+        """Generate caption tokens and attention heatmaps for image(s).
+
+        Args:
+            image (torch.Tensor): (batch_size, 3, 224, 224)
+            vocab: Vocabulary object.
+            max_len (int): Maximum caption length.
+            method (str): 'greedy' or 'beam'.
+            beam_size (int): Beam width for beam search.
+            length_penalty_alpha (float): Length penalty exponent.
+
+        Returns:
+            results (list[list[str]]): List of generated word token lists per image.
+            alphas (list[torch.Tensor]): List of attention weight tensors per image.
+        """
         features = self.encoder(image)
 
         if method == "greedy":
-            sampled_ids, alphas = self.decoder.sample(features, max_len=max_len, return_alphas=True)
+            sampled_ids, alphas = self.decoder.sample(
+                features, max_len=max_len, return_alphas=True
+            )
             return [vocab.denumericalize(ids) for ids in sampled_ids], alphas
 
         if method == "beam":
@@ -45,8 +96,11 @@ class CaptionModel(nn.Module):
             alphas_list = []
             for i in range(features.size(0)):
                 best_ids, beam_alphas = beam_search(
-                    self.decoder, features[i:i + 1], vocab,
-                    beam_size=beam_size, max_len=max_len,
+                    self.decoder,
+                    features[i:i + 1],
+                    vocab,
+                    beam_size=beam_size,
+                    max_len=max_len,
                     length_penalty_alpha=length_penalty_alpha,
                     return_alphas=True,
                 )
