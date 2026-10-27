@@ -210,21 +210,25 @@ QFrame#attentionsGridBox {
 QFrame#attentionItemFrame {
     background-color: transparent;
     border: none;
+    margin: 0px;
+    padding: 0px;
 }
 
 QLabel#attentionWordLabel {
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
-    color: #0F172A;
+    color: #000000;
     background: transparent;
 }
 
 QLabel#attentionThumbLabel {
-    border-radius: 6px;
+    border: 1px solid #CBD5E1;
+    border-radius: 0px;
+    background-color: #000000;
 }
 
 QLabel#attentionThumbLabel:hover {
-    border: 1.5px solid #2563EB;
+    border: 1px solid #64748B;
 }
 
 /* Attention Modal Dialog (Image 4) */

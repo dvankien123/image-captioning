@@ -171,7 +171,7 @@ class SlidingTabPill(QWidget):
 
 
 class SmoothThumbnailLabel(QLabel):
-    """Heatmap thumbnail label with antialiased rounded corners and smooth hover zoom & border."""
+    """Heatmap thumbnail label matching the clean reference attention display."""
 
     def __init__(self, pixmap: QPixmap, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -179,12 +179,22 @@ class SmoothThumbnailLabel(QLabel):
         self._zoom: float = 1.0
         self._is_hovered: bool = False
         self.setObjectName("attentionThumbLabel")
-        self.setFixedSize(100, 68)
         self.setAlignment(Qt.AlignCenter)
+        self._update_geometry()
 
         self._anim = QPropertyAnimation(self, b"zoom")
         self._anim.setDuration(160)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def _update_geometry(self):
+        target_w = 138
+        if self._pixmap and not self._pixmap.isNull():
+            pw = max(1, self._pixmap.width())
+            ph = max(1, self._pixmap.height())
+            target_h = max(60, min(150, int(target_w * ph / pw)))
+            self.setFixedSize(target_w, target_h)
+        else:
+            self.setFixedSize(target_w, 90)
 
     def get_zoom(self) -> float:
         return self._zoom
@@ -197,13 +207,14 @@ class SmoothThumbnailLabel(QLabel):
 
     def set_pixmap(self, pixmap: QPixmap):
         self._pixmap = pixmap
+        self._update_geometry()
         self.update()
 
     def set_hovered(self, hovered: bool):
         self._is_hovered = hovered
         self._anim.stop()
         self._anim.setStartValue(self._zoom)
-        self._anim.setEndValue(1.06 if hovered else 1.0)
+        self._anim.setEndValue(1.03 if hovered else 1.0)
         self._anim.start()
 
     def paintEvent(self, event):
@@ -212,25 +223,15 @@ class SmoothThumbnailLabel(QLabel):
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
         rect = self.rect()
-        path = QPainterPath()
-        path.addRoundedRect(
-            rect.x() + 0.5,
-            rect.y() + 0.5,
-            rect.width() - 1,
-            rect.height() - 1,
-            6,
-            6,
-        )
-        painter.setClipPath(path)
 
         if self._pixmap and not self._pixmap.isNull():
-            pw = self._pixmap.width()
-            ph = self._pixmap.height()
+            pw = max(1, self._pixmap.width())
+            ph = max(1, self._pixmap.height())
             rw = rect.width() * self._zoom
             rh = rect.height() * self._zoom
 
-            # Scale preserving aspect ratio (center-crop fill) so image is never squished
-            scale = max(rw / max(1, pw), rh / max(1, ph))
+            # Scale preserving natural aspect ratio without center-crop clipping
+            scale = min(rw / pw, rh / ph)
             draw_w = pw * scale
             draw_h = ph * scale
             draw_x = (rect.width() - draw_w) / 2.0
@@ -241,15 +242,6 @@ class SmoothThumbnailLabel(QLabel):
                 self._pixmap,
                 QRectF(self._pixmap.rect()),
             )
-
-        # Draw smooth active border when hovered
-        if self._zoom > 1.005:
-            painter.setClipping(False)
-            pen = QPen(QColor("#2563EB"), 1.8)
-            pen.setJoinStyle(Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 6, 6)
 
         painter.end()
 

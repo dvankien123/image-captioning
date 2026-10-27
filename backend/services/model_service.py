@@ -195,7 +195,7 @@ class CaptionModelService:
 
             torch.cuda.empty_cache()
 
-    def _attention_overlay(self, cropped_image, attention):
+    def _attention_overlay(self, vis_image, attention):
         import numpy as np
         from PIL import Image, ImageFilter
 
@@ -219,34 +219,25 @@ class CaptionModelService:
         weights = np.maximum(weights.reshape(grid_size, grid_size), 0.0)
         w_min = float(weights.min())
         w_max = float(weights.max())
-        w_mean = float(weights.mean())
-        contrast = (w_max - w_min) / (w_mean + 1e-8)
 
         if w_max - w_min > 1e-8:
             weights = (weights - w_min) / (w_max - w_min)
         else:
             weights.fill(0.0)
 
-        # Bicubic resize + Gaussian blur to eliminate 14x14 patch boundary artifacts
+        # Bicubic resize + Gaussian blur to match standard reference attention overlay
         heatmap = Image.fromarray(
             np.uint8(np.clip(weights * 255.0, 0.0, 255.0))
-        ).resize(cropped_image.size, Image.Resampling.BICUBIC)
-        heatmap = heatmap.filter(ImageFilter.GaussianBlur(radius=6))
+        ).resize(vis_image.size, Image.Resampling.BICUBIC)
+        heatmap = heatmap.filter(ImageFilter.GaussianBlur(radius=4))
 
         h_arr = np.asarray(heatmap, dtype=np.float32) / 255.0
         colors = Image.fromarray(
             self._jet_colorize(h_arr)
         )
 
-        # Dynamic alpha blend: keep photo natural, only highlight hot regions
-        strength = min(1.0, max(0.25, contrast / 3.0))
-        alpha_mask = np.clip((h_arr - 0.20) / 0.65, 0.0, 1.0) * 0.58 * strength
-        alpha_3d = np.expand_dims(alpha_mask, axis=-1)
-
-        base_np = np.asarray(cropped_image.convert("RGB"), dtype=np.float32)
-        col_np = np.asarray(colors, dtype=np.float32)
-        blended = (base_np * (1.0 - alpha_3d) + col_np * alpha_3d).astype(np.uint8)
-        overlay = Image.fromarray(blended)
+        # Uniform alpha blend (0.50) across full image preserving dark-blue cold regions and glowing hot spots
+        overlay = Image.blend(vis_image, colors, alpha=0.50)
 
         buffer = BytesIO()
         overlay.save(buffer, format="JPEG", quality=85)
@@ -280,11 +271,18 @@ class CaptionModelService:
         with Image.open(image_path) as source:
             image = source.convert("RGB")
             tensor = self.transform(image).unsqueeze(0).to(self.device)
-            cropped_image = (
-                CenterCrop(settings.IMAGE_SIZE)(Resize(256)(image))
-                if with_attention
-                else None
-            )
+            if with_attention:
+                max_dim = 640
+                w, h = image.size
+                if max(w, h) > max_dim:
+                    scale = max_dim / max(w, h)
+                    vis_image = image.resize(
+                        (int(w * scale), int(h * scale)), Image.Resampling.LANCZOS
+                    )
+                else:
+                    vis_image = image.copy()
+            else:
+                vis_image = None
 
         with torch.inference_mode():
             features = self.model.encoder(tensor)
@@ -348,13 +346,13 @@ class CaptionModelService:
                 token_attention.append(attention_rows[index])
 
         caption = " ".join(words).strip()
-        if not with_attention or not self.supports_attention or cropped_image is None:
+        if not with_attention or not self.supports_attention or vis_image is None:
             return caption, []
 
         steps = [
             {
                 "word": word,
-                "image": self._attention_overlay(cropped_image, weights),
+                "image": self._attention_overlay(vis_image, weights),
             }
             for word, weights in zip(words, token_attention)
         ]

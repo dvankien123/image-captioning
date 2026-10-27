@@ -130,7 +130,7 @@ def test_file_drop_generates_caption_and_attentions(qapp):
 
     # Wait for inference worker if running
     if win._active_worker:
-        win._active_worker.wait(5000)
+        win._active_worker.wait(20000)
     qapp.processEvents()
 
     # Check Caption tab

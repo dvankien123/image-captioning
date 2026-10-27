@@ -193,8 +193,15 @@ class BackendClient:
         try:
             with Image.open(p) as img:
                 base_img = img.convert("RGB")
-                target_w, target_h = 320, 220
-                resized = base_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                orig_w, orig_h = base_img.size
+                max_dim = 640
+                if max(orig_w, orig_h) > max_dim:
+                    scale = max_dim / max(orig_w, orig_h)
+                    target_w, target_h = int(orig_w * scale), int(orig_h * scale)
+                    resized = base_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                else:
+                    target_w, target_h = orig_w, orig_h
+                    resized = base_img.copy()
         except Exception:
             target_w, target_h = 320, 220
             resized = Image.new("RGB", (target_w, target_h), color=(140, 170, 190))
@@ -213,7 +220,7 @@ class BackendClient:
             colored_arr = cls._jet_colorize(h_arr)
             colored_img = Image.fromarray(colored_arr)
 
-            overlay = Image.blend(resized, colored_img, alpha=0.45)
+            overlay = Image.blend(resized, colored_img, alpha=0.50)
             buffer = BytesIO()
             overlay.save(buffer, format="JPEG", quality=85)
             b64_str = base64.b64encode(buffer.getvalue()).decode("ascii")
