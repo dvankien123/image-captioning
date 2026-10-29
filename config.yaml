@@ -4,9 +4,9 @@ paths:
   train_annotations: data/raw/coco2017/annotations/captions_train2017.json
   val_annotations: data/raw/coco2017/annotations/captions_val2017.json
   vocab: data/processed/vocab.pickle
-  checkpoint: checkpoints/best_model_coco.pth
-  last_checkpoint: checkpoints/last_checkpoint_coco.pth
-  pretrained_checkpoint: checkpoints/best_model.pth
+  checkpoint: /content/drive/My Drive/image-captioning/checkpoints/best_model_coco.pth
+  last_checkpoint: /content/drive/My Drive/image-captioning/checkpoints/last_checkpoint_coco.pth
+  pretrained_checkpoint: /content/drive/My Drive/image-captioning/checkpoints/best_model.pth
 
 data:
   freq_threshold: 5        # từ xuất hiện < 5 lần -> <unk>
