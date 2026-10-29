@@ -1,12 +1,12 @@
 paths:
-  images: data/raw/flickr30k_images/flickr30k_images
-  captions: data/raw/flickr30k_images/results.csv
-  train_json: data/splits/train.json
-  val_json: data/splits/val.json
-  test_json: data/splits/test.json
+  train_images: data/raw/coco2017/train2017
+  val_images: data/raw/coco2017/val2017
+  train_annotations: data/raw/coco2017/annotations/captions_train2017.json
+  val_annotations: data/raw/coco2017/annotations/captions_val2017.json
   vocab: data/processed/vocab.pickle
-  checkpoint: checkpoints/best_model.pth
-  last_checkpoint: checkpoints/last_checkpoint.pth
+  checkpoint: checkpoints/best_model_coco.pth
+  last_checkpoint: checkpoints/last_checkpoint_coco.pth
+  pretrained_checkpoint: checkpoints/best_model.pth
 
 data:
   freq_threshold: 5        # từ xuất hiện < 5 lần -> <unk>
@@ -20,11 +20,11 @@ model:
   num_decoder_layers: 3     # Số tầng Transformer Decoder (theo yêu cầu: 3 tầng)
   dim_feedforward: 2048     # Chiều tầng ẩn FFN bên trong Transformer
   dropout: 0.1              # Dropout rate chuẩn cho Transformer
-  train_backbone: true     # Đóng băng hoàn toàn ViT backbone
+  train_backbone: false     # Đóng băng hoàn toàn ViT backbone
   tie_weights: true         # Chia sẻ trọng số giữa embedding và fc output layer
 
 train:
-  resume: false
+  resume: true
   seed: 42
   batch_size: 64
   lr: 0.0003
