@@ -1,4 +1,3 @@
-import argparse
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -11,7 +10,7 @@ from src.utils import (
     load_vocab,
     save_checkpoint,
 )
-from src.dataset import Flickr30kDataset, collate_fn
+from src.dataset import CocoDataset, collate_fn
 from src.transform import get_train_transform, get_eval_transform
 from src.model import CaptionModel
 
@@ -79,6 +78,43 @@ def validate(model, loader, criterion, device):
     return total_loss / max(total_tokens, 1)
 
 
+def load_pretrained_weights(model, checkpoint, tie_weights=True):
+    """Transfer weights from a pretrained checkpoint, supporting partial vocabulary transfer."""
+    old_state_dict = checkpoint["model_state_dict"]
+    model_state_dict = model.state_dict()
+    old_vocab_size = checkpoint.get("model_config", {}).get("vocab_size", 0)
+
+    # 1. Transfer non-vocabulary layers (Encoder and Decoder Transformer layers)
+    transferred_count = 0
+    for k, v in old_state_dict.items():
+        if k in ("decoder.embed.weight", "decoder.fc.weight"):
+            continue
+        if k in model_state_dict and model_state_dict[k].shape == v.shape:
+            model_state_dict[k].copy_(v)
+            transferred_count += 1
+
+    # 2. Transfer vocabulary embeddings for overlapping token indices
+    if "decoder.embed.weight" in old_state_dict and "decoder.embed.weight" in model_state_dict:
+        embed_param = model_state_dict["decoder.embed.weight"]
+        old_embed = old_state_dict["decoder.embed.weight"]
+        copy_len = min(old_embed.size(0), embed_param.size(0))
+        embed_param[:copy_len].copy_(old_embed[:copy_len])
+
+        if tie_weights:
+            model_state_dict["decoder.fc.weight"].copy_(embed_param)
+        elif "decoder.fc.weight" in old_state_dict:
+            old_fc = old_state_dict["decoder.fc.weight"]
+            fc_param = model_state_dict["decoder.fc.weight"]
+            fc_len = min(old_fc.size(0), fc_param.size(0))
+            fc_param[:fc_len].copy_(old_fc[:fc_len])
+
+    model.load_state_dict(model_state_dict)
+    print(
+        f"Transferred {transferred_count} layer tensors and {old_vocab_size} "
+        f"token embeddings from pretrained checkpoint."
+    )
+
+
 def main(config, config_dir, resume=None):
     if resume is None:
         resume = config["train"].get("resume", False)
@@ -90,15 +126,15 @@ def main(config, config_dir, resume=None):
     vocab = load_vocab(config_dir / config["paths"]["vocab"])
     print(f"Vocab size: {len(vocab)}")
 
-    train_set = Flickr30kDataset(
-        image_path=config_dir / config["paths"]["images"],
-        split_path=config_dir / config["paths"]["train_json"],
+    train_set = CocoDataset(
+        image_path=config_dir / config["paths"]["train_images"],
+        annotation_path=config_dir / config["paths"]["train_annotations"],
         vocab=vocab,
         transform=get_train_transform(config["data"]["image_size"]),
     )
-    val_set = Flickr30kDataset(
-        image_path=config_dir / config["paths"]["images"],
-        split_path=config_dir / config["paths"]["val_json"],
+    val_set = CocoDataset(
+        image_path=config_dir / config["paths"]["val_images"],
+        annotation_path=config_dir / config["paths"]["val_annotations"],
         vocab=vocab,
         transform=get_eval_transform(config["data"]["image_size"]),
     )
@@ -135,40 +171,74 @@ def main(config, config_dir, resume=None):
 
     best_checkpoint_path = config_dir / config["paths"]["checkpoint"]
     last_checkpoint_path = config_dir / config["paths"].get(
-        "last_checkpoint", "checkpoints/last_checkpoint.pth"
+        "last_checkpoint", "checkpoints/last_checkpoint_coco.pth"
+    )
+    pretrained_checkpoint_path = config_dir / config["paths"].get(
+        "pretrained_checkpoint", "checkpoints/best_model.pth"
     )
 
     start_epoch = 0
     checkpoint = None
+    is_resumed_from_same_vocab = False
     finetune_transition = False
+
     if resume:
         if not last_checkpoint_path.is_file():
-            raise FileNotFoundError(
-                f"Resume requested but last checkpoint not found: {last_checkpoint_path}"
-            )
-        print(f"Resuming training from checkpoint: {last_checkpoint_path}")
-        checkpoint = load_checkpoint(last_checkpoint_path, map_location=device)
-
-        last_model_config = checkpoint.get("model_config", {})
-        finetune_transition = (
-            config["model"]["train_backbone"]
-            and not last_model_config.get("train_backbone", False)
-        )
-        if finetune_transition:
-            if not best_checkpoint_path.is_file():
-                raise FileNotFoundError(
-                    "Fine-tuning transition requested, but best checkpoint not found: "
-                    f"{best_checkpoint_path}"
+            if pretrained_checkpoint_path.is_file():
+                print(
+                    f"Notice: '{last_checkpoint_path}' not found, but pretrained checkpoint "
+                    f"'{pretrained_checkpoint_path}' was found. Starting COCO phase from pretrained weights..."
                 )
-            print(
-                "Fine-tuning transition detected; loading best checkpoint: "
-                f"{best_checkpoint_path}"
-            )
-            checkpoint = load_checkpoint(best_checkpoint_path, map_location=device)
+                checkpoint = load_checkpoint(pretrained_checkpoint_path, map_location=device)
+                load_pretrained_weights(model, checkpoint, tie_weights=model_config["tie_weights"])
+                start_epoch = 0
+            else:
+                raise FileNotFoundError(
+                    f"Resume requested but neither last checkpoint ({last_checkpoint_path}) "
+                    f"nor pretrained checkpoint ({pretrained_checkpoint_path}) was found."
+                )
+        else:
+            print(f"Resuming training from checkpoint: {last_checkpoint_path}")
+            checkpoint = load_checkpoint(last_checkpoint_path, map_location=device)
+            ckpt_vocab_size = checkpoint.get("model_config", {}).get("vocab_size")
 
-        model.load_state_dict(checkpoint["model_state_dict"])
-        start_epoch = checkpoint["epoch"]
+            if ckpt_vocab_size == len(vocab):
+                last_model_config = checkpoint.get("model_config", {})
+                finetune_transition = (
+                    config["model"]["train_backbone"]
+                    and not last_model_config.get("train_backbone", False)
+                )
+                if finetune_transition:
+                    if not best_checkpoint_path.is_file():
+                        raise FileNotFoundError(
+                            "Fine-tuning transition requested, but best checkpoint not found: "
+                            f"{best_checkpoint_path}"
+                        )
+                    print(
+                        "Fine-tuning transition detected; loading best checkpoint: "
+                        f"{best_checkpoint_path}"
+                    )
+                    checkpoint = load_checkpoint(best_checkpoint_path, map_location=device)
 
+                model.load_state_dict(checkpoint["model_state_dict"])
+                start_epoch = checkpoint["epoch"]
+                is_resumed_from_same_vocab = True
+            else:
+                print(
+                    f"Checkpoint vocab size ({ckpt_vocab_size}) != current vocab size ({len(vocab)}). "
+                    "Performing partial weight transfer..."
+                )
+                load_pretrained_weights(model, checkpoint, tie_weights=model_config["tie_weights"])
+                start_epoch = 0
+    elif pretrained_checkpoint_path.is_file():
+        print(f"Loading pretrained weights from: {pretrained_checkpoint_path}")
+        checkpoint = load_checkpoint(pretrained_checkpoint_path, map_location=device)
+        load_pretrained_weights(model, checkpoint, tie_weights=model_config["tie_weights"])
+        start_epoch = 0
+    else:
+        print("Starting training from scratch (no pretrained checkpoint found)...")
+
+    # Group parameters for different learning rates
     backbone_params = []
     if config["model"]["train_backbone"]:
         backbone_module = model.encoder.encoder
@@ -194,31 +264,36 @@ def main(config, config_dir, resume=None):
             }
         )
     elif (
-        resume
+        is_resumed_from_same_vocab
         and config["model"]["train_backbone"]
         and len(checkpoint["optimizer_state_dict"]["param_groups"]) == 2
     ):
-        # Fine-tuning checkpoints created by this flow have separate base and
-        # backbone groups; rebuild the same structure before loading their state.
         optimizer = torch.optim.Adam(
             [
-                {
-                    "params": base_params,
-                    "lr": config["train"]["lr"]
-                },
-                {
-                    "params": backbone_params,
-                    "lr": config["train"]["lr_finetune"]
-                },
+                {"params": base_params, "lr": config["train"]["lr"]},
+                {"params": backbone_params, "lr": config["train"]["lr_finetune"]},
             ]
         )
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    else:
+    elif config["model"]["train_backbone"] and backbone_params:
         optimizer = torch.optim.Adam(
-            trainable_params, lr=config["train"]["lr"]
+            [
+                {"params": base_params, "lr": config["train"]["lr"]},
+                {"params": backbone_params, "lr": config["train"]["lr_finetune"]},
+            ]
         )
-        if resume:
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if is_resumed_from_same_vocab and checkpoint is not None:
+            try:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            except Exception as e:
+                print(f"Notice: Could not restore optimizer state ({e}); using fresh optimizer.")
+    else:
+        optimizer = torch.optim.Adam(trainable_params, lr=config["train"]["lr"])
+        if is_resumed_from_same_vocab and checkpoint is not None:
+            try:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            except Exception as e:
+                print(f"Notice: Could not restore optimizer state ({e}); using fresh optimizer.")
 
     criterion = nn.CrossEntropyLoss(ignore_index=vocab.word2idx["<pad>"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -231,18 +306,20 @@ def main(config, config_dir, resume=None):
         patience=config["train"].get("early_stopping_patience", 5)
     )
 
-    if resume and not finetune_transition:
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        early_stopping.load_state_dict(checkpoint["early_stopping_state"])
-        early_stopping.should_stop = False
+    if is_resumed_from_same_vocab and not finetune_transition and checkpoint is not None:
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if "early_stopping_state" in checkpoint:
+            early_stopping.load_state_dict(checkpoint["early_stopping_state"])
+            early_stopping.should_stop = False
 
-    if resume:
+    if is_resumed_from_same_vocab:
         print(
             f"Resumed at epoch {start_epoch} (val_loss={checkpoint['val_loss']}). "
             f"Training will continue from epoch {start_epoch + 1}."
         )
     else:
-        print("Starting training from scratch (epoch 0)...")
+        print("Starting COCO training phase from epoch 1...")
 
     if start_epoch >= config["train"]["epochs"]:
         print(
@@ -251,7 +328,7 @@ def main(config, config_dir, resume=None):
         )
         return
 
-    print("Starting training with ViT-Transformer...")
+    print("Starting training with ViT-Transformer on MS COCO 2017...")
     try:
         for epoch in range(start_epoch + 1, config["train"]["epochs"] + 1):
             train_loss = train_one_epoch(
@@ -310,3 +387,6 @@ def main(config, config_dir, resume=None):
     print("Training finished! Best val_loss:", early_stopping.best_loss)
 
 
+if __name__ == "__main__":
+    config, config_dir = load_config()
+    main(config, config_dir)
