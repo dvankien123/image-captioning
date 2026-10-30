@@ -1,34 +1,42 @@
 # Image Captioning API
 
-FastAPI backend for the ViT-B/16 encoder and Transformer decoder from the
-repository's main branch. The original ResNet-LSTM implementation stays in
-`model/`; the current model source is isolated under `model_vit/`.
+FastAPI backend for the ViT-B/16 encoder and Transformer decoder.
+Model source files are located under `src/`, checkpoints are in `checkpoints/`, backend server code is in `backend/`, and dataset/vocabulary files are in `data/`.
 
 ## Setup
 
-From the repository root in PowerShell, create the Python 3.14 environment and install the backend dependencies. The CUDA 12.6 wheels use the NVIDIA GPU when available and fall back to CPU otherwise:
+From the repository root in PowerShell, create the virtual environment and install dependencies:
 
 ```powershell
-py -3.14 -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --index-url https://download.pytorch.org/whl/cu126 --extra-index-url https://pypi.org/simple -r backend\requirements.txt
 ```
 
 Install the root `requirements.txt` as well if you need the training notebooks.
 
-The GitHub main branch contains the model source and configuration, but does
-not include trained weights. Place a checkpoint produced by this ViT-Transformer
-model at `model_vit/checkpoints/best_model.pth`. The old file at
-`model/checkpoints/best_model.pth` is a ResNet-LSTM checkpoint and is not
-compatible. Set `MODEL_CHECKPOINT` in the root `.env` file to use another
-compatible checkpoint.
+Trained checkpoints should be placed at `checkpoints/best_model.pth`. Set `MODEL_CHECKPOINT` in the root `.env` file if you wish to use a different checkpoint path.
 
 ## Run
 
-    .\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+To start the backend server:
 
-Open http://127.0.0.1:8000/docs to try the API. For a local GPU or CPU server, run one worker so the model is loaded only once:
+```powershell
+.\run_backend.bat
+```
 
-    .\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
+Or manually:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+To start the frontend UI:
+
+```powershell
+.\run_frontend.bat
+```
+
+Open http://127.0.0.1:8000/docs to explore the API documentation.
 
 ## API
 

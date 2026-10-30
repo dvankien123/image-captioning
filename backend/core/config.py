@@ -6,6 +6,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+
+def _resolve_default_checkpoint() -> Path:
+    for candidate in [
+        PROJECT_ROOT / "checkpoints" / "best_model.pth",
+        PROJECT_ROOT / "checkpoint" / "best_model.pth",
+    ]:
+        if candidate.is_file():
+            return candidate
+    return PROJECT_ROOT / "checkpoints" / "best_model.pth"
+
+
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Image Captioning API"
     MAX_FILE_SIZE_MB: int = Field(default=10, ge=1, le=50)
@@ -15,7 +26,7 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_INFERENCES: int = Field(default=1, ge=1, le=8)
     INFERENCE_QUEUE_TIMEOUT_SECONDS: int = Field(default=30, ge=1, le=300)
     HISTORY_MAX_LIMIT: int = Field(default=100, ge=1, le=500)
-    MODEL_CHECKPOINT: Path = PROJECT_ROOT / "model_vit" / "checkpoints" / "best_model.pth"
+    MODEL_CHECKPOINT: Path = _resolve_default_checkpoint()
     DECODING_METHOD: Literal["greedy", "beam"] = "beam"
     BEAM_SIZE: int = Field(default=3, ge=1, le=10)
     BEAM_LENGTH_PENALTY_ALPHA: float = Field(default=0.6, ge=0.0, le=3.0)
@@ -27,5 +38,6 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
 
 settings = Settings()

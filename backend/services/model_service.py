@@ -24,7 +24,7 @@ class CaptionModelService:
 
     @staticmethod
     def _activate_model_sources(model_src_path: Path):
-        """Bind `src.*` imports to one model directory without cross-contamination."""
+        """Bind `src.*` imports to the model directory without cross-contamination."""
         for module_name in tuple(sys.modules):
             if module_name == "src" or module_name.startswith("src."):
                 del sys.modules[module_name]
@@ -41,8 +41,17 @@ class CaptionModelService:
         checkpoint_path = Path(settings.MODEL_CHECKPOINT).expanduser()
         if not checkpoint_path.is_absolute():
             checkpoint_path = PROJECT_ROOT / checkpoint_path
-        model_root_path = PROJECT_ROOT / "model_vit"
-        model_src_path = model_root_path / "src"
+        if not checkpoint_path.is_file():
+            # Check alternative checkpoint directory locations
+            for alt in [
+                PROJECT_ROOT / "checkpoints" / "best_model.pth",
+                PROJECT_ROOT / "checkpoint" / "best_model.pth",
+            ]:
+                if alt.is_file():
+                    checkpoint_path = alt
+                    break
+
+        model_src_path = PROJECT_ROOT / "src"
         import torch
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -86,9 +95,18 @@ class CaptionModelService:
             )
         if not isinstance(checkpoint, dict):
             raise ValueError(f"Checkpoint không hợp lệ: {checkpoint_path}")
-        if checkpoint.get("vocab") is None or checkpoint.get("model_state_dict") is None:
-            raise ValueError("Checkpoint phải có model_state_dict và vocab.")
-        return checkpoint, checkpoint["vocab"]
+        vocab = checkpoint.get("vocab")
+        if vocab is None:
+            vocab_path = PROJECT_ROOT / "data" / "processed" / "vocab.pickle"
+            if vocab_path.is_file():
+                import pickle
+                with vocab_path.open("rb") as f:
+                    vocab = pickle.load(f)
+            else:
+                raise ValueError("Checkpoint thiếu vocab và không tìm thấy data/processed/vocab.pickle.")
+        if checkpoint.get("model_state_dict") is None:
+            raise ValueError("Checkpoint phải có model_state_dict.")
+        return checkpoint, vocab
 
     def _load_vit(self, checkpoint_path: Path, model_src_path: Path, device, torch):
         checkpoint, vocab = self._load_checkpoint(checkpoint_path, model_src_path, torch)
