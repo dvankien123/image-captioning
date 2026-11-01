@@ -144,8 +144,9 @@ class AttentionsView(QWidget):
         # Top Caption Box (Image 3)
         self.caption_card = QFrame()
         self.caption_card.setObjectName("captionCard")
+        self.caption_card.setMinimumHeight(100)
         caption_layout = QHBoxLayout(self.caption_card)
-        caption_layout.setContentsMargins(20, 20, 20, 20)
+        caption_layout.setContentsMargins(20, 24, 20, 24)
         caption_layout.setAlignment(Qt.AlignCenter)
 
         self.caption_text = QLabel("A picture about a mountain")
@@ -153,7 +154,7 @@ class AttentionsView(QWidget):
         self.caption_text.setAlignment(Qt.AlignCenter)
         self.caption_text.setWordWrap(True)
         caption_layout.addWidget(self.caption_text)
-        content_layout.addWidget(self.caption_card, 0)
+        content_layout.addWidget(self.caption_card, 3)
 
         # Bottom Grid Box (Image 3)
         self.grid_card = QFrame()
@@ -172,7 +173,7 @@ class AttentionsView(QWidget):
 
         self.scroll_area.setWidget(self.scroll_content)
         grid_outer_layout.addWidget(self.scroll_area)
-        content_layout.addWidget(self.grid_card, 1)
+        content_layout.addWidget(self.grid_card, 7)
 
         self.stack.addWidget(self.content_page)
         layout.addWidget(self.stack)

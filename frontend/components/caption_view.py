@@ -115,6 +115,7 @@ class CaptionResultsView(QWidget):
         # Bottom Caption Card
         self.caption_card = QFrame()
         self.caption_card.setObjectName("captionCard")
+        self.caption_card.setMinimumHeight(100)
         caption_layout = QHBoxLayout(self.caption_card)
         caption_layout.setContentsMargins(20, 24, 20, 24)
         caption_layout.setAlignment(Qt.AlignCenter)

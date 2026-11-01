@@ -159,3 +159,22 @@ def test_attention_modal(qapp):
     assert dlg.bottom_word_lbl.text() == "Word: mountain"
     dlg.close_animated()
     qapp.processEvents()
+
+
+def test_attentions_view_multiline_caption_display(qapp):
+    win = MainWindow()
+    win.resize(1024, 550)
+    win.show()
+
+    caption = "a white dog runs through the grass ."
+    steps = [{"word": w, "image": ""} for w in ["a", "white", "dog", "runs", "through", "the", "grass", "."]]
+    win._on_inference_finished({"caption": caption, "attention": {"steps": steps}})
+
+    win._set_active_tab(1)
+    qapp.processEvents()
+
+    # The caption text must match the full caption exactly
+    assert win.attentions_view.caption_text.text() == caption
+    # The caption card must have sufficient height (at least 100px) so that all lines fit without clipping
+    assert win.attentions_view.caption_card.height() >= 100
+    assert win.attentions_view.caption_text.height() >= win.attentions_view.caption_text.sizeHint().height()
