@@ -22,6 +22,7 @@ data/raw/
 .codex/
 AGENTS.md
 __pycache__/
+temp_uploads/
 
 notebooks/.ipynb_checkpoints
 notebooks/train_model.ipynb

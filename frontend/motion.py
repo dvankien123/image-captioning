@@ -63,9 +63,10 @@ class SlidingTabPill(QWidget):
     - Respects prefers-reduced-motion by snapping immediately.
     """
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, corner_radius: float = 0.0):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.corner_radius = corner_radius
         self._current_x: float = 0.0
         self._current_w: float = 0.0
         self._start_x: float = 0.0
@@ -141,32 +142,32 @@ class SlidingTabPill(QWidget):
         max_travel = max(1.0, total_w - self._current_w)
         ratio = max(0.0, min(1.0, self._current_x / max_travel))
 
-        # Smoothly morph corner radii based on tab position
-        # Left tab: r_tl = 18px, r_tr = 0px
-        # Right tab: r_tl = 0px, r_tr = 18px
-        r_tl = 18.0 * (1.0 - ratio)
-        r_tr = 18.0 * ratio
         w = self._current_w
         h = self.height()
 
-        path = QPainterPath()
-        path.moveTo(0, h)
-        path.lineTo(0, r_tl)
-        if r_tl > 0.5:
-            path.quadTo(0, 0, r_tl, 0)
+        if self.corner_radius <= 0:
+            painter.fillRect(QRectF(0, 0, w, h), QColor("#FFFFFF"))
         else:
-            path.lineTo(0, 0)
+            r_tl = self.corner_radius * (1.0 - ratio)
+            r_tr = self.corner_radius * ratio
+            path = QPainterPath()
+            path.moveTo(0, h)
+            path.lineTo(0, r_tl)
+            if r_tl > 0.5:
+                path.quadTo(0, 0, r_tl, 0)
+            else:
+                path.lineTo(0, 0)
 
-        path.lineTo(w - r_tr, 0)
-        if r_tr > 0.5:
-            path.quadTo(w, 0, w, r_tr)
-        else:
-            path.lineTo(w, 0)
+            path.lineTo(w - r_tr, 0)
+            if r_tr > 0.5:
+                path.quadTo(w, 0, w, r_tr)
+            else:
+                path.lineTo(w, 0)
 
-        path.lineTo(w, h)
-        path.closeSubpath()
+            path.lineTo(w, h)
+            path.closeSubpath()
 
-        painter.fillPath(path, QColor("#FFFFFF"))
+            painter.fillPath(path, QColor("#FFFFFF"))
         painter.end()
 
 

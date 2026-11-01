@@ -14,6 +14,7 @@ from io import BytesIO
 import mimetypes
 import os
 from pathlib import Path
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -25,12 +26,16 @@ class BackendClient:
     """HTTP client communicating with the FastAPI image captioning backend,
     with direct in-process model inference fallback when backend server is offline."""
 
+    _prewarmed: bool = False
+
     def __init__(self, base_url: str = "http://127.0.0.1:8000"):
         self.base_url = base_url.rstrip("/")
         self._direct_service = None
-        # Pre-warm model in background so inference is instant
-        import threading
-        threading.Thread(target=self._get_direct_service, daemon=True).start()
+        # Pre-warm model in background once so inference is instant
+        if not BackendClient._prewarmed and "pytest" not in sys.modules:
+            BackendClient._prewarmed = True
+            import threading
+            threading.Thread(target=self._get_direct_service, daemon=True).start()
 
     def _get_direct_service(self):
         """Lazy-load the in-process model service if HTTP backend is offline."""
@@ -175,19 +180,19 @@ class BackendClient:
     def generate_mock_result(cls, file_path: str) -> Dict[str, Any]:
         """Generate demo caption and attention overlays matching the design images."""
         p = Path(file_path)
-        caption = "A picture about a mountain"
+        caption = "A white dog runs through the grass."
+        tokens = ["a", "white", "dog", "runs", "through", "the", "grass", "."]
 
-        # 9 attention focus points matching the 9 items in Image 3
+        # Focus points matching the 8 caption tokens
         focus_points = [
-            (0.30, 0.35, 95),   # Top-left sky/mountain slope
-            (0.50, 0.40, 100),  # Mountain summit
-            (0.65, 0.42, 90),   # Right mountain slope
-            (0.75, 0.50, 85),   # Right horizon
-            (0.50, 0.65, 110),  # Island / boat reflection
-            (0.35, 0.60, 95),   # Left water reflection
-            (0.60, 0.62, 90),   # Right water reflection
-            (0.50, 0.50, 120),  # Central landscape
-            (0.40, 0.70, 85),   # Foreground water ripple
+            (0.35, 0.40, 70),   # a (general dog background)
+            (0.48, 0.38, 90),   # white (body)
+            (0.42, 0.36, 100),  # dog (torso + tail hot spot matching Image 3)
+            (0.46, 0.58, 85),   # runs (paws)
+            (0.48, 0.65, 80),   # through (motion)
+            (0.55, 0.70, 75),   # the
+            (0.50, 0.80, 110),  # grass (foreground grass)
+            (0.50, 0.50, 60),   # .
         ]
 
         try:
@@ -207,7 +212,8 @@ class BackendClient:
             resized = Image.new("RGB", (target_w, target_h), color=(140, 170, 190))
 
         steps: List[Dict[str, str]] = []
-        for i, (fx, fy, r) in enumerate(focus_points):
+        for i, word in enumerate(tokens):
+            fx, fy, r = focus_points[i % len(focus_points)]
             cx = int(fx * target_w)
             cy = int(fy * target_h)
 
@@ -226,7 +232,7 @@ class BackendClient:
             b64_str = base64.b64encode(buffer.getvalue()).decode("ascii")
 
             steps.append({
-                "word": "...",
+                "word": word,
                 "image": f"data:image/jpeg;base64,{b64_str}",
             })
 
@@ -235,7 +241,7 @@ class BackendClient:
             "original_filename": p.name,
             "caption": caption,
             "attention": {
-                "method": "gradcam",
+                "method": "vit_cross_attention",
                 "steps": steps,
             },
         }
