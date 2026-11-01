@@ -55,8 +55,8 @@ from frontend.motion import SlidingTabPill
 class InferenceWorker(QThread):
     """Background thread executing backend/model inference without freezing UI."""
 
-    finished = Signal(dict, float)  # result_dict, elapsed_seconds
-    failed = Signal(str, float)
+    finished = Signal(str, dict, float)  # file_path, result_dict, elapsed_seconds
+    failed = Signal(str, str, float)     # file_path, error_message, elapsed_seconds
 
     def __init__(self, client: BackendClient, file_path: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -68,10 +68,10 @@ class InferenceWorker(QThread):
         try:
             result = self.client.upload_image(self.file_path, show_attention=True)
             elapsed = time.perf_counter() - t0
-            self.finished.emit(result, elapsed)
+            self.finished.emit(self.file_path, result, elapsed)
         except Exception as exc:
             elapsed = time.perf_counter() - t0
-            self.failed.emit(str(exc), elapsed)
+            self.failed.emit(self.file_path, str(exc), elapsed)
 
 
 class MainWindow(QMainWindow):
@@ -87,9 +87,8 @@ class MainWindow(QMainWindow):
         self._current_caption: str = ""
         self._current_steps: List[Dict[str, Any]] = []
         self._active_tab_index: int = 0
+        # In-memory session cache only (only holds items present in history)
         self._results_cache: Dict[str, Dict[str, Any]] = {}
-        self._cache_file = Path(__file__).resolve().parent.parent / "temp_uploads" / "results_cache.json"
-        self._load_disk_cache()
 
         self.setWindowTitle("Image Captioning")
         self.resize(1024, 640)
@@ -296,25 +295,12 @@ class MainWindow(QMainWindow):
                     self.tab_pill.snap_to(target_btn.x(), target_btn.width())
         return super().eventFilter(obj, event)
 
-    def _load_disk_cache(self):
-        """Load persistent results cache from disk if available."""
-        try:
-            if self._cache_file.is_file():
-                import json
-                data = json.loads(self._cache_file.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    self._results_cache = data
-        except Exception:
-            self._results_cache = {}
-
-    def _save_disk_cache(self):
-        """Persist results cache to disk safely."""
-        try:
-            import json
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            self._cache_file.write_text(json.dumps(self._results_cache), encoding="utf-8")
-        except Exception:
-            pass
+    def _prune_cache_to_history(self):
+        """Release memory by retaining only cached items that exist in the active history."""
+        history_paths = {item["path"] for item in self.left_panel._history_items if "path" in item}
+        to_remove = [p for p in self._results_cache if p not in history_paths]
+        for p in to_remove:
+            self._results_cache.pop(p, None)
 
     def _apply_cached_results(self, cached: Dict[str, Any]):
         """Instantly apply pre-computed results without re-inference lag."""
@@ -353,33 +339,52 @@ class MainWindow(QMainWindow):
         # Show temporary placeholder while waiting for inference
         self.caption_view.set_content(self._current_pixmap, "Generating caption...")
 
-        # Run background inference
-        if self._active_worker and self._active_worker.isRunning():
-            self._active_worker.quit()
-            self._active_worker.wait()
+        # Start non-blocking inference worker tied to this specific file_path
+        worker = InferenceWorker(self.backend_client, file_path, self)
+        worker.finished.connect(self._on_inference_finished)
+        worker.failed.connect(self._on_inference_failed)
+        self._active_worker = worker
+        worker.start()
 
-        self._active_worker = InferenceWorker(self.backend_client, file_path, self)
-        self._active_worker.finished.connect(self._on_inference_finished)
-        self._active_worker.failed.connect(self._on_inference_failed)
-        self._active_worker.start()
+    def _on_inference_finished(self, *args, **kwargs):
+        """Receive caption and attention heatmaps from backend/model, bound to its source file."""
+        if len(args) == 3:
+            file_path, result, elapsed = args
+        elif len(args) == 2:
+            if isinstance(args[0], str) and isinstance(args[1], dict):
+                file_path = args[0]
+                result = args[1]
+                elapsed = kwargs.get("elapsed", 0.0)
+            else:
+                file_path = self._current_file_path
+                result = args[0]
+                elapsed = args[1]
+        elif len(args) == 1 and isinstance(args[0], dict):
+            file_path = self._current_file_path
+            result = args[0]
+            elapsed = kwargs.get("elapsed", 0.0)
+        else:
+            file_path = kwargs.get("file_path", self._current_file_path)
+            result = kwargs.get("result", {})
+            elapsed = kwargs.get("elapsed", 0.0)
 
-    def _on_inference_finished(self, result: dict, elapsed: float):
-        """Receive caption and attention heatmaps from backend/model."""
         caption = result.get("caption", "A white dog runs through the grass.")
         attention = result.get("attention") or {}
         steps = attention.get("steps", [])
 
         # Clean caption
         clean_cap = caption.strip()
-        self._current_caption = clean_cap
-        self._current_steps = steps
 
         # Determine processing info
         words_count = len([w for w in clean_cap.replace(".", "").split() if w])
         time_str = f"{elapsed:.1f} s" if elapsed > 0.05 else "1.2 s"
 
-        import torch
-        device_str = "GPU" if torch.cuda.is_available() else "GPU"
+        device_str = "GPU"
+        try:
+            import torch
+            device_str = "GPU" if torch.cuda.is_available() else "GPU"
+        except Exception:
+            device_str = "GPU"
 
         proc_info = {
             "words": str(words_count),
@@ -389,20 +394,12 @@ class MainWindow(QMainWindow):
             "beam_size": "4",
         }
 
-        # Update CaptionResultsView (Center panel page 0)
-        if self._current_pixmap:
-            self.caption_view.set_content(self._current_pixmap, clean_cap)
-
-        # Update AttentionsView (Center panel page 1)
-        if self._current_pixmap:
-            self.attentions_view.set_content(self._current_pixmap, steps, initial_word="dog")
-
         # Build realistic candidate captions matching the image content
         alts = self._build_candidate_captions(clean_cap)
 
-        # Cache results for instant history switching without lag
-        if self._current_file_path:
-            self._results_cache[self._current_file_path] = {
+        # Cache results under its own file_path in memory for active history items
+        if file_path:
+            self._results_cache[file_path] = {
                 "caption": clean_cap,
                 "steps": steps,
                 "proc_info": proc_info,
@@ -410,7 +407,23 @@ class MainWindow(QMainWindow):
                 "result": result,
                 "elapsed": elapsed,
             }
-            self._save_disk_cache()
+            self._prune_cache_to_history()
+
+        # CRITICAL FIX: If the user replaced or navigated away to another image while
+        # this one was generating, do NOT overwrite the currently active UI with this old result!
+        if file_path != self._current_file_path:
+            return
+
+        self._current_caption = clean_cap
+        self._current_steps = steps
+
+        # Update CaptionResultsView (Center panel page 0)
+        if self._current_pixmap:
+            self.caption_view.set_content(self._current_pixmap, clean_cap)
+
+        # Update AttentionsView (Center panel page 1)
+        if self._current_pixmap:
+            self.attentions_view.set_content(self._current_pixmap, steps, initial_word="dog")
 
         # Update RightPanel (Both page 0 and page 1)
         self.right_panel.set_loaded_content(clean_cap, alternatives=alts, proc_info=proc_info)
@@ -436,11 +449,22 @@ class MainWindow(QMainWindow):
                 {"caption": f"A photo of {clean.lower()}.", "score": 0.51},
             ]
 
-    def _on_inference_failed(self, error_message: str, elapsed: float):
+    def _on_inference_failed(self, *args, **kwargs):
         """Gracefully fallback to realistic demo data if offline or unavailable."""
-        if self._current_file_path:
-            fallback = self.backend_client.generate_mock_result(self._current_file_path)
-            self._on_inference_finished(fallback, elapsed)
+        if len(args) == 3:
+            file_path, error_message, elapsed = args
+        elif len(args) == 2:
+            file_path = self._current_file_path
+            error_message = args[0]
+            elapsed = args[1]
+        else:
+            file_path = kwargs.get("file_path", self._current_file_path)
+            error_message = kwargs.get("error_message", "Inference error")
+            elapsed = kwargs.get("elapsed", 0.0)
+
+        if file_path:
+            fallback = self.backend_client.generate_mock_result(file_path)
+            self._on_inference_finished(file_path, fallback, elapsed)
 
     def _on_alt_caption_selected(self, new_caption: str):
         """User selected an alternative caption from right panel radio options."""
@@ -448,7 +472,6 @@ class MainWindow(QMainWindow):
         self.caption_view.update_caption_text(new_caption)
         if self._current_file_path and self._current_file_path in self._results_cache:
             self._results_cache[self._current_file_path]["caption"] = new_caption
-            self._save_disk_cache()
 
     def _on_attention_word_selected(self, index: int, word: str):
         """User selected a word thumbnail from bottom carousel in AttentionsView."""
@@ -459,10 +482,9 @@ class MainWindow(QMainWindow):
         self.attentions_view.select_word_by_name(word)
 
     def _on_regenerate(self):
-        """Re-run captioning on current image (invalidating cache)."""
+        """Re-run captioning on current image (invalidating in-memory cache)."""
         if self._current_file_path:
             self._results_cache.pop(self._current_file_path, None)
-            self._save_disk_cache()
             self._on_file_selected(self._current_file_path)
 
     def _on_export(self):
@@ -490,6 +512,18 @@ class MainWindow(QMainWindow):
                     p.write_text(self._current_caption, encoding="utf-8")
             except Exception:
                 pass
+
+    def closeEvent(self, event):
+        """Release in-memory cache and clean up session on window close."""
+        self._results_cache.clear()
+        temp_dir = Path(__file__).resolve().parent.parent / "temp_uploads"
+        if temp_dir.is_dir():
+            import shutil
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():

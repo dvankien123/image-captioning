@@ -342,3 +342,107 @@ def test_history_cache_instant_switching(qapp, tmp_path):
     assert win._active_worker is None
     assert "blue" in win.caption_view.lbl_caption.text().lower()
     assert win._current_file_path == img2_path
+
+
+def test_image_replacement_during_generation_no_caption_mixup(qapp, tmp_path):
+    """Verify that replacing an image while inference is ongoing does NOT assign the old caption to the new image."""
+    win = MainWindow()
+    win.resize(1024, 640)
+    win.show()
+    qapp.processEvents()
+
+    imgA = str(tmp_path / "apple.png")
+    pixA = QPixmap(100, 100)
+    pixA.fill(Qt.red)
+    pixA.save(imgA)
+
+    imgB = str(tmp_path / "banana.png")
+    pixB = QPixmap(100, 100)
+    pixB.fill(Qt.yellow)
+    pixB.save(imgB)
+
+    # 1. User starts generating Image A
+    win._current_file_path = imgA
+    win._current_pixmap = QPixmap(imgA)
+    win.left_panel.set_loaded_file(imgA)
+    win.caption_view.set_content(win._current_pixmap, "Generating caption...")
+
+    # 2. Before A finishes, user replaces with Image B!
+    win._current_file_path = imgB
+    win._current_pixmap = QPixmap(imgB)
+    win.left_panel.set_loaded_file(imgB)
+    win.caption_view.set_content(win._current_pixmap, "Generating caption...")
+
+    # 3. Worker for Image A finishes late!
+    resA = {"caption": "A red ripe apple on a table.", "attention": {"steps": [{"word": "apple", "image": ""}]}}
+    win._on_inference_finished(imgA, resA, 1.2)
+    qapp.processEvents()
+
+    # Image A's result must be safely cached, BUT MUST NOT overwrite active UI of Image B!
+    assert imgA in win._results_cache
+    assert "apple" in win._results_cache[imgA]["caption"].lower()
+    # The active UI must NOT show Apple caption! It still displays Image B's loading state
+    assert "apple" not in win.caption_view.lbl_caption.text().lower()
+
+    # 4. Worker for Image B finishes
+    resB = {"caption": "A sweet yellow banana.", "attention": {"steps": [{"word": "banana", "image": ""}]}}
+    win._on_inference_finished(imgB, resB, 1.1)
+    qapp.processEvents()
+
+    # Now Image B's UI receives its own correct Banana caption!
+    assert "banana" in win.caption_view.lbl_caption.text().lower()
+    assert "banana" in win._results_cache[imgB]["caption"].lower()
+
+    # 5. User clicks Image A in history -> instantly shows Apple!
+    win._on_file_selected(imgA)
+    qapp.processEvents()
+    assert "apple" in win.caption_view.lbl_caption.text().lower()
+
+    # 6. User clicks Image B in history -> instantly shows Banana!
+    win._on_file_selected(imgB)
+    qapp.processEvents()
+    assert "banana" in win.caption_view.lbl_caption.text().lower()
+
+
+def test_cache_memory_only_and_cleared_on_app_restart(qapp, tmp_path):
+    """Verify that cache only keeps history items in RAM and is completely clean on restart."""
+    win = MainWindow()
+    win.resize(1024, 640)
+    win.show()
+    qapp.processEvents()
+
+    # Verify brand new window starts with empty cache
+    assert len(win._results_cache) == 0
+
+    img = str(tmp_path / "test_fresh.png")
+    pix = QPixmap(50, 50)
+    pix.fill(Qt.white)
+    pix.save(img)
+
+    win._current_file_path = img
+    win._current_pixmap = QPixmap(img)
+    win.left_panel.set_loaded_file(img)
+    win._on_inference_finished(
+        img,
+        {"caption": "A test image.", "attention": {"steps": [{"word": "test", "image": ""}]}},
+        1.0,
+    )
+    qapp.processEvents()
+
+    # Cached while in history
+    assert img in win._results_cache
+
+    # Manually simulate pruning with an item not in history
+    win._results_cache["non_existent_path.jpg"] = {"caption": "fake"}
+    win._prune_cache_to_history()
+    assert "non_existent_path.jpg" not in win._results_cache
+
+    # Close window -> cache released
+    win.close()
+    qapp.processEvents()
+    assert len(win._results_cache) == 0
+
+    # New window starts empty (gen lại từ đầu)
+    win2 = MainWindow()
+    assert len(win2._results_cache) == 0
+    win2.close()
