@@ -427,7 +427,13 @@ class AttentionsView(QWidget):
         self._steps = []
         self.stack.setCurrentIndex(0)
 
-    def set_content(self, orig_pixmap: QPixmap, steps: List[Dict[str, Any]], initial_word: str = "dog"):
+    def set_content(
+        self,
+        orig_pixmap: QPixmap,
+        steps: List[Dict[str, Any]],
+        initial_word: str = "dog",
+        initial_index: Optional[int] = None,
+    ):
         """Populate the Attentions View with steps and set default active word."""
         self._orig_pixmap = orig_pixmap
         self._steps = steps
@@ -446,13 +452,16 @@ class AttentionsView(QWidget):
 
         self.stack.setCurrentIndex(1)
 
-        # Find initial word index (prefer 'dog' if present, otherwise 0)
+        # Find initial word index (prefer initial_index, then 'dog' if present, otherwise 0)
         target_idx = 0
-        for i, step in enumerate(steps):
-            w = step.get("word", "").strip().lower()
-            if w == initial_word.lower():
-                target_idx = i
-                break
+        if initial_index is not None and 0 <= initial_index < len(steps):
+            target_idx = initial_index
+        elif initial_word:
+            for i, step in enumerate(steps):
+                w = step.get("word", "").strip().lower()
+                if w == initial_word.lower():
+                    target_idx = i
+                    break
 
         self._current_index = target_idx
 
@@ -488,17 +497,20 @@ class AttentionsView(QWidget):
         return pix
 
     def _on_card_clicked(self, index: int, word: str):
-        self.select_word_by_index(index)
+        self.select_word_by_index(index, emit_signal=True)
 
-    def select_word_by_index(self, index: int):
+    def select_word_by_index(self, index: int, emit_signal: bool = True):
         if not (0 <= index < len(self._steps)):
             return
         self._current_index = index
         for i, card in enumerate(self._card_widgets):
             card.update_selection(i == index)
         self._apply_step(index)
+        if 0 <= index < len(self._card_widgets):
+            self.scroll_area.ensureWidgetVisible(self._card_widgets[index], 20, 0)
         word = self._steps[index].get("word", "")
-        self.word_selected.emit(index, word)
+        if emit_signal:
+            self.word_selected.emit(index, word)
 
     def select_word_by_name(self, word_name: str):
         for i, step in enumerate(self._steps):

@@ -220,7 +220,7 @@ class RightPanel(QFrame):
     """Right sidebar matching Images 1, 2, 3."""
 
     caption_selected = Signal(str)
-    token_selected = Signal(str)
+    token_selected = Signal(int, str)
     copy_clicked = Signal(str)
     export_clicked = Signal()
 
@@ -233,6 +233,7 @@ class RightPanel(QFrame):
         self._current_caption: str = ""
         self._tokens: List[str] = []
         self._selected_token: str = "dog"
+        self._selected_index: int = 0
 
         self._init_ui()
 
@@ -455,12 +456,17 @@ class RightPanel(QFrame):
             if w:
                 w.deleteLater()
         self.token_buttons.clear()
+        self._tokens = []
+        self._selected_token = ""
+        self._selected_index = 0
 
     def set_loaded_content(
         self,
         caption: str,
         alternatives: Optional[List[Dict[str, Any]]] = None,
         proc_info: Optional[Dict[str, str]] = None,
+        steps: Optional[List[Dict[str, Any]]] = None,
+        initial_index: Optional[int] = None,
     ):
         """Populate right panel matching Image 2 & 3."""
         self._current_caption = caption
@@ -510,9 +516,14 @@ class RightPanel(QFrame):
         self.val_beam.setText(str(info.get("beam_size", "4")))
 
         # 3. Populate Caption Token Pills for Attentions Tab
-        self._populate_tokens(caption)
+        self._populate_tokens(caption, steps=steps, initial_index=initial_index)
 
-    def _populate_tokens(self, caption: str):
+    def _populate_tokens(
+        self,
+        caption: str,
+        steps: Optional[List[Dict[str, Any]]] = None,
+        initial_index: Optional[int] = None,
+    ):
         # Clear existing buttons
         while self.tokens_layout.count():
             item = self.tokens_layout.takeAt(0)
@@ -521,55 +532,120 @@ class RightPanel(QFrame):
                 w.deleteLater()
         self.token_buttons.clear()
 
-        # Tokenize (strip period if trailing)
-        clean = caption.strip()
-        tokens = [w for w in clean.replace(".", "").split() if w]
+        # Extract tokens from steps if available to ensure 1-to-1 parity with AttentionsView
+        if steps:
+            tokens = [s.get("word", "") for s in steps if s.get("word") is not None]
+        else:
+            clean = caption.strip()
+            tokens = [w for w in clean.replace(".", "").split() if w]
         self._tokens = tokens
 
-        # Default selected token
-        if "dog" in tokens:
-            self._selected_token = "dog"
+        # Determine initial selected index
+        target_idx = 0
+        if initial_index is not None and 0 <= initial_index < len(tokens):
+            target_idx = initial_index
+        elif "dog" in [t.lower() for t in tokens]:
+            for i, t in enumerate(tokens):
+                if t.lower() == "dog":
+                    target_idx = i
+                    break
         elif tokens:
-            self._selected_token = tokens[min(2, len(tokens) - 1)]
+            target_idx = 0
         else:
-            self._selected_token = ""
+            target_idx = -1
 
-        for token in tokens:
+        self._selected_index = target_idx
+        self._selected_token = tokens[target_idx] if (0 <= target_idx < len(tokens)) else ""
+
+        for i, token in enumerate(tokens):
             btn = QPushButton(token)
             btn.setCursor(Qt.PointingHandCursor)
-            is_active = (token.lower() == self._selected_token.lower())
+            is_active = (i == self._selected_index)
             btn.setObjectName("tokenPillActive" if is_active else "tokenPillNormal")
-            btn.clicked.connect(self._make_token_click_handler(token))
+            btn.clicked.connect(self._make_token_click_handler(i, token))
             self.token_buttons.append(btn)
             self.tokens_layout.addWidget(btn)
 
-        self._update_why_word_section(self._selected_token)
+        self._update_why_word_section(self._selected_token, self._selected_index)
 
-    def _make_token_click_handler(self, token: str):
+    def _make_token_click_handler(self, index: int, token: str):
         def handler():
-            self.set_selected_token(token)
-            self.token_selected.emit(token)
+            self.set_selected_token_by_index(index)
+            self.token_selected.emit(index, token)
         return handler
 
-    def set_selected_token(self, token_name: str):
-        """Update selected token pill and why this word distributions."""
-        self._selected_token = token_name.strip().lower()
+    def set_selected_token_by_index(self, index: int):
+        """Update selected token pill and why this word distributions by token index."""
+        if not (0 <= index < len(self.token_buttons)):
+            return
+        self._selected_index = index
+        self._selected_token = self._tokens[index] if index < len(self._tokens) else ""
 
-        for btn in self.token_buttons:
-            if btn.text().strip().lower() == self._selected_token:
+        for i, btn in enumerate(self.token_buttons):
+            if i == index:
                 btn.setObjectName("tokenPillActive")
             else:
                 btn.setObjectName("tokenPillNormal")
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
-        self._update_why_word_section(self._selected_token)
+        self._update_why_word_section(self._selected_token, index)
 
-    def _update_why_word_section(self, word: str):
+    def set_selected_token(self, token_or_index):
+        """Update selected token by index or token name."""
+        if isinstance(token_or_index, int):
+            self.set_selected_token_by_index(token_or_index)
+            return
+
+        token_name = str(token_or_index).strip().lower()
+        matched_idx = -1
+        if 0 <= self._selected_index < len(self._tokens) and self._tokens[self._selected_index].strip().lower() == token_name:
+            matched_idx = self._selected_index
+        else:
+            for i, t in enumerate(self._tokens):
+                if t.strip().lower() == token_name:
+                    matched_idx = i
+                    break
+
+        if matched_idx != -1:
+            self.set_selected_token_by_index(matched_idx)
+        else:
+            self._selected_token = token_name
+            self._update_why_word_section(token_name, -1)
+
+    def _update_why_word_section(self, word: str, index: int = -1):
         """Update the 'WHY THIS WORD?' probability distribution list."""
-        # Update context box
-        if word == "dog":
+        if not word:
+            return
+
+        # Update context box dynamically based on surrounding tokens
+        if 0 <= index < len(self._tokens):
+            start_i = max(0, index - 2)
+            end_i = min(len(self._tokens), index + 3)
+            prefix = " ".join(self._tokens[start_i:index])
+            suffix = " ".join(self._tokens[index + 1:end_i])
+            lead = "... " if start_i > 0 else ""
+            trail = " ..." if end_i < len(self._tokens) else ""
+            if prefix and suffix:
+                ctx_text = f'{lead}{prefix} <b style="color:#EA580C;">{word}</b> {suffix}{trail}'
+            elif prefix:
+                ctx_text = f'{lead}{prefix} <b style="color:#EA580C;">{word}</b>{trail}'
+            elif suffix:
+                ctx_text = f'{lead}<b style="color:#EA580C;">{word}</b> {suffix}{trail}'
+            else:
+                ctx_text = f'{lead}<b style="color:#EA580C;">{word}</b>{trail}'
+            self.why_context_lbl.setText(ctx_text)
+        elif word == "dog":
             self.why_context_lbl.setText('a white <b style="color:#EA580C;">dog</b> ...')
+        elif word == "grass":
+            self.why_context_lbl.setText('through the <b style="color:#EA580C;">grass</b>')
+        elif word == "runs":
+            self.why_context_lbl.setText('dog <b style="color:#EA580C;">runs</b> through ...')
+        else:
+            self.why_context_lbl.setText(f'... <b style="color:#EA580C;">{word}</b> ...')
+
+        low_word = word.lower()
+        if low_word == "dog":
             candidates = [
                 {"word": "dog", "prob": 91.2, "selected": True},
                 {"word": "puppy", "prob": 4.1, "selected": False},
@@ -578,8 +654,7 @@ class RightPanel(QFrame):
                 {"word": "wolf", "prob": 0.6, "selected": False},
                 {"word": "horse", "prob": 0.3, "selected": False},
             ]
-        elif word == "grass":
-            self.why_context_lbl.setText('through the <b style="color:#EA580C;">grass</b>')
+        elif low_word == "grass":
             candidates = [
                 {"word": "grass", "prob": 88.4, "selected": True},
                 {"word": "lawn", "prob": 6.2, "selected": False},
@@ -588,8 +663,7 @@ class RightPanel(QFrame):
                 {"word": "park", "prob": 0.5, "selected": False},
                 {"word": "meadow", "prob": 0.3, "selected": False},
             ]
-        elif word == "runs":
-            self.why_context_lbl.setText('dog <b style="color:#EA580C;">runs</b> through ...')
+        elif low_word == "runs":
             candidates = [
                 {"word": "runs", "prob": 84.7, "selected": True},
                 {"word": "running", "prob": 9.5, "selected": False},
@@ -599,7 +673,6 @@ class RightPanel(QFrame):
                 {"word": "stands", "prob": 0.2, "selected": False},
             ]
         else:
-            self.why_context_lbl.setText(f'... <b style="color:#EA580C;">{word}</b> ...')
             candidates = [
                 {"word": word, "prob": 89.5, "selected": True},
                 {"word": "similar", "prob": 5.4, "selected": False},

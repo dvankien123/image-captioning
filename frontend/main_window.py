@@ -321,7 +321,7 @@ class MainWindow(QMainWindow):
             self.attentions_view.set_content(self._current_pixmap, steps, initial_word="dog")
 
         # Update RightPanel (Both page 0 and page 1)
-        self.right_panel.set_loaded_content(clean_cap, alternatives=alts, proc_info=proc_info)
+        self.right_panel.set_loaded_content(clean_cap, alternatives=alts, proc_info=proc_info, steps=steps)
 
     def _on_file_selected(self, file_path: str):
         """User uploaded or chose an image file."""
@@ -426,7 +426,7 @@ class MainWindow(QMainWindow):
             self.attentions_view.set_content(self._current_pixmap, steps, initial_word="dog")
 
         # Update RightPanel (Both page 0 and page 1)
-        self.right_panel.set_loaded_content(clean_cap, alternatives=alts, proc_info=proc_info)
+        self.right_panel.set_loaded_content(clean_cap, alternatives=alts, proc_info=proc_info, steps=steps)
 
     def _build_candidate_captions(self, base_caption: str) -> List[Dict[str, Any]]:
         """Generate alternative captions matching the style of Image 2."""
@@ -475,11 +475,14 @@ class MainWindow(QMainWindow):
 
     def _on_attention_word_selected(self, index: int, word: str):
         """User selected a word thumbnail from bottom carousel in AttentionsView."""
-        self.right_panel.set_selected_token(word)
+        self.right_panel.set_selected_token_by_index(index)
 
-    def _on_right_token_selected(self, word: str):
+    def _on_right_token_selected(self, index: int, word: Optional[str] = None):
         """User clicked a caption token pill in RightPanel."""
-        self.attentions_view.select_word_by_name(word)
+        if isinstance(index, int):
+            self.attentions_view.select_word_by_index(index, emit_signal=False)
+        elif isinstance(index, str):
+            self.attentions_view.select_word_by_name(index)
 
     def _on_regenerate(self):
         """Re-run captioning on current image (invalidating in-memory cache)."""

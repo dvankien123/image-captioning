@@ -446,3 +446,105 @@ def test_cache_memory_only_and_cleared_on_app_restart(qapp, tmp_path):
     win2 = MainWindow()
     assert len(win2._results_cache) == 0
     win2.close()
+
+
+def test_repeated_tokens_independent_selection_and_attention(qapp, tmp_path):
+    """Verify that repeated words (e.g. multiple 'a') highlight independently and do not share attention."""
+    import base64
+    from io import BytesIO
+    from PIL import Image
+
+    win = MainWindow()
+    win.resize(1024, 640)
+    win.show()
+    qapp.processEvents()
+
+    # Generate distinct dummy b64 heatmaps for each step
+    def make_b64(color):
+        img = Image.new("RGB", (20, 20), color=color)
+        buf = BytesIO()
+        img.save(buf, format="JPEG")
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+    words = ["a", "man", "in", "a", "suit", "is", "holding", "a", "microphone", "in", "front", "of", "a", "microphone"]
+    colors = [
+        "red", "gray", "gray", "green", "gray", "gray", "gray",
+        "blue", "gray", "gray", "gray", "gray", "yellow", "gray"
+    ]
+    steps = [{"word": w, "image": make_b64(c)} for w, c in zip(words, colors)]
+    caption = " ".join(words)
+
+    img_path = str(tmp_path / "test_dup.png")
+    pix = QPixmap(100, 100)
+    pix.fill(Qt.white)
+    pix.save(img_path)
+
+    win._current_file_path = img_path
+    win._current_pixmap = QPixmap(img_path)
+    win.left_panel.set_loaded_file(img_path)
+    win._on_inference_finished(img_path, {"caption": caption, "attention": {"steps": steps}}, 1.0)
+    qapp.processEvents()
+
+    # Switch to Attentions tab
+    win._set_active_tab(1)
+    qapp.processEvents()
+
+    # Verify initial state: exactly 14 token buttons and 14 thumbnail cards
+    assert len(win.right_panel.token_buttons) == 14
+    assert len(win.attentions_view._card_widgets) == 14
+
+    # 1. Click the 2nd 'a' (index 3) in the right panel
+    win.right_panel.token_buttons[3].click()
+    qapp.processEvents()
+
+    # ONLY token button 3 should be active, all other 'a' buttons must be normal!
+    assert win.right_panel.token_buttons[3].objectName() == "tokenPillActive"
+    assert win.right_panel.token_buttons[0].objectName() == "tokenPillNormal"
+    assert win.right_panel.token_buttons[7].objectName() == "tokenPillNormal"
+    assert win.right_panel.token_buttons[12].objectName() == "tokenPillNormal"
+
+    # AttentionsView must select step 3, NOT step 0!
+    assert win.attentions_view._current_index == 3
+    assert win.attentions_view._card_widgets[3].selected is True
+    assert win.attentions_view._card_widgets[0].selected is False
+    assert win.attentions_view._card_widgets[7].selected is False
+    assert win.attentions_view._card_widgets[12].selected is False
+
+    # The context snippet must reflect the 2nd 'a' ("in a suit")
+    ctx_text = win.right_panel.why_context_lbl.text()
+    assert "in" in ctx_text and "suit" in ctx_text
+
+    # 2. Click the 3rd 'a' (index 7) thumbnail card in the center carousel
+    win.attentions_view._card_widgets[7].clicked.emit(7, "a")
+    qapp.processEvents()
+
+    # AttentionsView must select step 7
+    assert win.attentions_view._current_index == 7
+    assert win.attentions_view._card_widgets[7].selected is True
+    assert win.attentions_view._card_widgets[3].selected is False
+    assert win.attentions_view._card_widgets[0].selected is False
+    assert win.attentions_view._card_widgets[12].selected is False
+
+    # Right panel must update so ONLY button 7 is active!
+    assert win.right_panel.token_buttons[7].objectName() == "tokenPillActive"
+    assert win.right_panel.token_buttons[0].objectName() == "tokenPillNormal"
+    assert win.right_panel.token_buttons[3].objectName() == "tokenPillNormal"
+    assert win.right_panel.token_buttons[12].objectName() == "tokenPillNormal"
+
+    # The context snippet must reflect the 3rd 'a' ("holding a microphone")
+    ctx_text_3rd = win.right_panel.why_context_lbl.text()
+    assert "holding" in ctx_text_3rd and "microphone" in ctx_text_3rd
+
+    # 3. Click the 4th 'a' (index 12) token button in the right panel
+    win.right_panel.token_buttons[12].click()
+    qapp.processEvents()
+
+    assert win.right_panel.token_buttons[12].objectName() == "tokenPillActive"
+    assert win.right_panel.token_buttons[0].objectName() == "tokenPillNormal"
+    assert win.right_panel.token_buttons[3].objectName() == "tokenPillNormal"
+    assert win.right_panel.token_buttons[7].objectName() == "tokenPillNormal"
+    assert win.attentions_view._current_index == 12
+    assert win.attentions_view._card_widgets[12].selected is True
+    assert win.attentions_view._card_widgets[7].selected is False
+
+    win.close()
