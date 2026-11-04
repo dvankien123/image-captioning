@@ -11,7 +11,7 @@ from backend.core.config import PROJECT_ROOT, settings
 
 
 class CaptionModelService:
-    """Loads the configured ViT model, falling back to the local ResNet-LSTM."""
+    """Loads and runs the configured ViT image-captioning model."""
 
     def __init__(self):
         self.model = None
@@ -42,46 +42,25 @@ class CaptionModelService:
         if not checkpoint_path.is_absolute():
             checkpoint_path = PROJECT_ROOT / checkpoint_path
         if not checkpoint_path.is_file():
-            # Check alternative checkpoint directory locations
-            for alt in [
-                PROJECT_ROOT / "checkpoints" / "best_model.pth",
-                PROJECT_ROOT / "checkpoint" / "best_model.pth",
-            ]:
-                if alt.is_file():
-                    checkpoint_path = alt
-                    break
+            raise FileNotFoundError(
+                f"Configured model checkpoint not found: {checkpoint_path}"
+            )
 
         model_src_path = PROJECT_ROOT / "src"
         import torch
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        legacy_checkpoint_path = PROJECT_ROOT / "model" / "checkpoints" / "best_model.pth"
-
-        if checkpoint_path.is_file():
-            model, vocab, transform, beam_search = self._load_vit(
-                checkpoint_path, model_src_path, device, torch
-            )
-            model_name = "ViT-B/16 + Transformer"
-            supports_attention = True
-        elif legacy_checkpoint_path.is_file():
-            model, vocab, transform, beam_search = self._load_legacy(
-                legacy_checkpoint_path, device, torch
-            )
-            model_name = "ResNet-50 + LSTM (local fallback)"
-            supports_attention = False
-        else:
-            raise FileNotFoundError(
-                f"Không tìm thấy checkpoint ViT: {checkpoint_path}; "
-                f"cũng không có checkpoint dự phòng: {legacy_checkpoint_path}."
-            )
+        model, vocab, transform, beam_search = self._load_vit(
+            checkpoint_path, model_src_path, device, torch
+        )
 
         self.model = model
         self.vocab = vocab
         self.device = device
         self.transform = transform
         self.beam_search = beam_search
-        self.model_name = model_name
-        self.supports_attention = supports_attention
+        self.model_name = "ViT-B/16 + Transformer"
+        self.supports_attention = True
 
     def _load_checkpoint(self, checkpoint_path: Path, source_path: Path, torch):
         if not source_path.is_dir():
@@ -133,9 +112,8 @@ class CaptionModelService:
         missing_config = sorted(required_config.difference(model_config))
         if missing_config:
             raise ValueError(
-                "Checkpoint is not from the ViT-Transformer model on main "
-                f"(missing model_config fields: {', '.join(missing_config)}). "
-                "The existing ResNet-LSTM checkpoint is not compatible."
+                "Checkpoint is missing required ViT-Transformer model_config "
+                f"fields: {', '.join(missing_config)}."
             )
 
         model_config = dict(model_config)
@@ -164,40 +142,6 @@ class CaptionModelService:
         model.eval()
         transform = get_eval_transform(settings.IMAGE_SIZE)
         return model, vocab, transform, beam_search
-
-    def _load_legacy(self, checkpoint_path: Path, device, torch):
-        source_path = PROJECT_ROOT / "model" / "src"
-        checkpoint, vocab = self._load_checkpoint(checkpoint_path, source_path, torch)
-        model_config = checkpoint.get("model_config")
-        if not isinstance(model_config, dict):
-            raise ValueError("ResNet-LSTM checkpoint thiếu model_config.")
-        required = {"embed_size", "hidden_size", "vocab_size"}
-        missing = sorted(required.difference(model_config))
-        if missing:
-            raise ValueError(
-                "ResNet-LSTM checkpoint thiếu cấu hình: " + ", ".join(missing)
-            )
-
-        CaptionModel = importlib.import_module("src.model").CaptionModel
-        get_eval_transform = importlib.import_module("src.transform").get_eval_transform
-        import torchvision.models as torchvision_models
-
-        resnet50 = torchvision_models.resnet50
-
-        def resnet50_without_pretrained_weights(*args, **kwargs):
-            kwargs["weights"] = None
-            kwargs.pop("pretrained", None)
-            return resnet50(*args, **kwargs)
-
-        with patch.object(
-            torchvision_models, "resnet50", new=resnet50_without_pretrained_weights
-        ):
-            model = CaptionModel(**model_config)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        model.to(device)
-        model.eval()
-        transform = get_eval_transform(settings.IMAGE_SIZE)
-        return model, vocab, transform, None
 
     def unload(self):
         using_cuda = self.device is not None and self.device.type == "cuda"
@@ -274,115 +218,166 @@ class CaptionModelService:
         rgb = np.stack((red, green, blue), axis=-1)
         return (rgb * 255).astype(np.uint8)
 
-    def _predict(self, image_path: str, with_attention: bool):
+    def predict_detailed(self, image_path: str, include_attention: bool = True) -> dict:
+        """Generate model-ranked captions and per-position decoder probabilities."""
         import torch
         from PIL import Image
-        from torchvision.transforms import CenterCrop, Resize
 
-        if (
-            self.model is None
-            or self.vocab is None
-            or self.transform is None
-        ):
+        if self.model is None or self.vocab is None or self.transform is None:
             raise RuntimeError("Caption model is not loaded.")
 
+        with_attention = include_attention and self.supports_attention
         with Image.open(image_path) as source:
             image = source.convert("RGB")
             tensor = self.transform(image).unsqueeze(0).to(self.device)
             if with_attention:
                 max_dim = 640
-                w, h = image.size
-                if max(w, h) > max_dim:
-                    scale = max_dim / max(w, h)
+                width, height = image.size
+                if max(width, height) > max_dim:
+                    scale = max_dim / max(width, height)
                     vis_image = image.resize(
-                        (int(w * scale), int(h * scale)), Image.Resampling.LANCZOS
+                        (int(width * scale), int(height * scale)), Image.Resampling.LANCZOS
                     )
                 else:
                     vis_image = image.copy()
             else:
                 vis_image = None
 
+        candidates = []
+        decoding_method = "greedy"
+        beam_width = 1
         with torch.inference_mode():
             features = self.model.encoder(tensor)
             if self.beam_search is not None and settings.DECODING_METHOD == "beam":
-                result = self.beam_search(
+                decoding_method = "beam"
+                beam_width = settings.BEAM_SIZE
+                decoded = self.beam_search(
                     self.model.decoder,
                     features,
                     self.vocab,
-                    beam_size=settings.BEAM_SIZE,
+                    beam_size=beam_width,
                     max_len=settings.MAX_CAPTION_LENGTH,
                     length_penalty_alpha=settings.BEAM_LENGTH_PENALTY_ALPHA,
                     return_alphas=with_attention,
+                    return_nbest=True,
+                    nbest=min(4, beam_width),
+                    token_top_k=6,
+                )
+                for item in decoded:
+                    token_ids = item["token_ids"]
+                    distributions = item["next_token_distributions"]
+                    alpha_rows = list(item["alphas"]) if with_attention else []
+                    candidates.append(self._format_candidate(
+                        token_ids,
+                        item["beam_score"],
+                        distributions,
+                        alpha_rows,
+                        vis_image,
+                        include_attention,
+                    ))
+            else:
+                sampled = self.model.decoder.sample(
+                    features,
+                    max_len=settings.MAX_CAPTION_LENGTH,
+                    return_alphas=with_attention,
                 )
                 if with_attention:
-                    token_ids, attention = result
-                    attention_rows = list(attention)
+                    token_batches, alpha_batches = sampled
                 else:
-                    token_ids = result
-                    attention_rows = []
-            else:
-                if self.beam_search is None:
-                    token_batches = self.model.decoder.sample(
-                        features,
-                        max_len=settings.MAX_CAPTION_LENGTH,
-                    )
-                    token_ids = token_batches[0]
-                    attention_rows = []
-                elif with_attention and self.supports_attention:
-                    token_batches, attention_batches = self.model.decoder.sample(
-                        features,
-                        max_len=settings.MAX_CAPTION_LENGTH,
-                        return_alphas=True,
-                    )
-                    token_ids = token_batches[0]
-                    attention_rows = list(attention_batches[0])
-                else:
-                    token_batches = self.model.decoder.sample(
-                        features,
-                        max_len=settings.MAX_CAPTION_LENGTH,
-                        return_alphas=False,
-                    )
-                    token_ids = token_batches[0]
-                    attention_rows = []
+                    token_batches, alpha_batches = sampled, []
+                token_ids = [
+                    int(token_id) for token_id in token_batches[0]
+                    if int(token_id) != self.vocab.word2idx["<end>"]
+                ]
+                distributions = self._next_token_distributions(features, token_ids)
+                alpha_rows = list(alpha_batches[0]) if alpha_batches else []
+                candidates.append(self._format_candidate(
+                    token_ids,
+                    None,
+                    distributions,
+                    alpha_rows,
+                    vis_image,
+                    include_attention,
+                ))
 
-        words = []
-        token_attention = []
-        end_id = self.vocab.word2idx["<end>"]
-        excluded_ids = {
-            self.vocab.word2idx["<pad>"],
-            self.vocab.word2idx["<start>"],
-            end_id,
+        primary = candidates[0] if candidates else {
+            "caption": "", "beam_score": None, "tokens": []
         }
+        return {
+            "caption": primary["caption"],
+            "candidates": candidates,
+            "attention": {
+                "method": "vit_cross_attention" if self.supports_attention else "unavailable",
+                "steps": [
+                    {"word": token["word"], "image": token.get("image", "")}
+                    for token in primary["tokens"]
+                ] if with_attention else [],
+            },
+            "metadata": {
+                "model": self.model_name,
+                "device": str(self.device),
+                "decoding_method": decoding_method,
+                "beam_size": beam_width,
+            },
+        }
+
+    def _next_token_distributions(self, features, token_ids):
+        """Compute next-token distributions along a greedy sequence."""
+        import torch
+        from torch.nn import functional as F
+
+        decoder = self.model.decoder
+        prefix = [self.vocab.word2idx["<start>"]]
+        distributions = []
+        for _token_id in token_ids:
+            current = torch.tensor([prefix], dtype=torch.long, device=features.device)
+            logits, _ = decoder.forward_step(features, current)
+            probabilities = F.softmax(logits, dim=-1).squeeze(0)
+            values, indices = probabilities.topk(min(6, probabilities.numel()))
+            distributions.append([
+                (int(word_id), float(probability))
+                for word_id, probability in zip(
+                    indices.detach().cpu().tolist(), values.detach().cpu().tolist()
+                )
+            ])
+            prefix.append(int(_token_id))
+        return distributions
+
+    def _format_candidate(
+        self, token_ids, beam_score, distributions, alpha_rows, vis_image, include_attention
+    ):
+        special_ids = {
+            self.vocab.word2idx.get("<pad>"),
+            self.vocab.word2idx.get("<start>"),
+            self.vocab.word2idx.get("<end>"),
+        }
+        tokens = []
         for index, token_id in enumerate(token_ids):
-            token_id = int(token_id)
-            if token_id == end_id:
-                break
-            if token_id in excluded_ids:
+            word = self.vocab.idx2word.get(int(token_id), "<unk>")
+            if int(token_id) in special_ids:
                 continue
-            words.append(self.vocab.idx2word.get(token_id, "<unk>"))
-            if with_attention and self.supports_attention and index < len(attention_rows):
-                token_attention.append(attention_rows[index])
-
-        caption = " ".join(words).strip()
-        if not with_attention or not self.supports_attention or vis_image is None:
-            return caption, []
-
-        steps = [
-            {
+            token = {
                 "word": word,
-                "image": self._attention_overlay(vis_image, weights),
+                "next_tokens": [
+                    {
+                        "word": self.vocab.idx2word.get(int(candidate_id), "<unk>"),
+                        "probability": float(probability),
+                        "selected": int(candidate_id) == int(token_id),
+                    }
+                    for candidate_id, probability in (
+                        distributions[index] if index < len(distributions) else []
+                    )
+                    if int(candidate_id) not in special_ids
+                ],
             }
-            for word, weights in zip(words, token_attention)
-        ]
-        return caption, steps
-
-    def predict(self, image_path: str) -> str:
-        caption, _ = self._predict(image_path, with_attention=False)
-        return caption
-
-    def predict_with_attention(self, image_path: str) -> tuple[str, list[dict[str, str]]]:
-        """Generate a caption with the ViT-Transformer's visual cross-attention."""
-        return self._predict(image_path, with_attention=True)
+            if include_attention and self.supports_attention and vis_image is not None and index < len(alpha_rows):
+                token["image"] = self._attention_overlay(vis_image, alpha_rows[index])
+            tokens.append(token)
+        return {
+            "caption": " ".join(token["word"] for token in tokens).strip(),
+            "beam_score": float(beam_score) if beam_score is not None else None,
+            "tokens": tokens,
+        }
 
 
 caption_model_service = CaptionModelService()

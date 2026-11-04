@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 
 from backend.core.config import settings
-from backend.core.database import Base, engine
+from backend.core.database import engine, initialize_database
 from backend.core.logger import logger
 from backend.models import caption_record
 from backend.routers import upload
@@ -15,7 +15,7 @@ from backend.services.model_service import caption_model_service
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    initialize_database(engine)
     app.state.inference_semaphore = asyncio.Semaphore(
         settings.MAX_CONCURRENT_INFERENCES
     )
@@ -67,13 +67,15 @@ async def readiness_check(request: Request):
                 ),
             },
         )
+    decoding_method = (
+        settings.DECODING_METHOD if caption_model_service.beam_search else "greedy"
+    )
     return {
         "status": "ready",
         "model": caption_model_service.model_name,
         "model_device": str(caption_model_service.device),
-        "decoding_method": (
-            settings.DECODING_METHOD if caption_model_service.beam_search else "greedy"
-        ),
+        "decoding_method": decoding_method,
+        "beam_size": settings.BEAM_SIZE if decoding_method == "beam" else 1,
         "supports_attention": caption_model_service.supports_attention,
     }
 

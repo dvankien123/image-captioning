@@ -2,13 +2,13 @@ import logging
 import sys
 from pathlib import Path
 
-from backend.core.config import PROJECT_ROOT
+from backend.core.config import settings
 
 logger = logging.getLogger("CaptionAPI")
 logger.setLevel(logging.INFO)
 
 if not logger.handlers:
-    log_dir = PROJECT_ROOT / "logs"
+    log_dir = settings.LOG_DIR
     log_dir.mkdir(parents=True, exist_ok=True)
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
