@@ -37,7 +37,7 @@ def main():
     )
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Image Captioning")
+    app.setApplicationName("Att Captioner")
 
     # Set clean system font
     font = QFont("-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial", 10)

@@ -4,6 +4,7 @@ python-multipart
 SQLAlchemy
 pydantic-settings
 Pillow
+numpy
 torch
 torchvision
 nltk
@@ -12,3 +13,4 @@ pandas
 tqdm
 pytest
 httpx
+PySide6

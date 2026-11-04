@@ -2,20 +2,20 @@
 
 Handles:
 - Backend health check (/health) and readiness check (/ready)
-- Image upload and caption inference with ViT cross-attention (/api/upload)
-- Direct in-process ViT model inference fallback when HTTP backend is offline
-- Graceful demo/fallback simulation when model checkpoint is not loaded
+- Image upload, caption inference, and persistent result retrieval via the API
 """
 
 from __future__ import annotations
 
 import base64
 from io import BytesIO
-import mimetypes
-import os
 from pathlib import Path
+import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+import time
+from typing import Any, Dict, List, Tuple
+from urllib.parse import urlparse
 
 import httpx
 from PIL import Image, ImageDraw, ImageFilter
@@ -23,36 +23,99 @@ import numpy as np
 
 
 class BackendClient:
-    """HTTP client communicating with the FastAPI image captioning backend,
-    with direct in-process model inference fallback when backend server is offline."""
+    """HTTP client for the FastAPI image captioning backend."""
 
-    _prewarmed: bool = False
+    _backend_start_lock = threading.Lock()
+    _backend_process = None
+    _backend_log_handle = None
 
     def __init__(self, base_url: str = "http://127.0.0.1:8000"):
         self.base_url = base_url.rstrip("/")
-        self._direct_service = None
-        # Pre-warm model in background once so inference is instant
-        if not BackendClient._prewarmed and "pytest" not in sys.modules:
-            BackendClient._prewarmed = True
-            import threading
-            threading.Thread(target=self._get_direct_service, daemon=True).start()
 
-    def _get_direct_service(self):
-        """Lazy-load the in-process model service if HTTP backend is offline."""
-        if self._direct_service is None:
+    def _is_managed_local_url(self) -> bool:
+        parsed = urlparse(self.base_url)
+        return (
+            parsed.scheme == "http"
+            and parsed.hostname in {"127.0.0.1", "localhost"}
+            and parsed.port == 8000
+        )
+
+    def _http_client(self, timeout: float):
+        # Localhost requests must bypass system proxies; some proxy settings
+        # otherwise turn a refused local connection into a long timeout.
+        return httpx.Client(timeout=timeout, trust_env=not self._is_managed_local_url())
+
+    def _ensure_backend(self, timeout: float = 180.0):
+        """Start the bundled local API when the default endpoint is not running."""
+        try:
+            with self._http_client(timeout=1.5) as client:
+                response = client.get(f"{self.base_url}/health")
+                if response.status_code == 200:
+                    return
+                raise RuntimeError(f"Backend health check returned HTTP {response.status_code}.")
+        except httpx.RequestError as exc:
+            if not self._is_managed_local_url():
+                raise RuntimeError(f"Cannot reach backend: {exc}") from exc
+
+        if not self._is_managed_local_url():
+            raise RuntimeError(f"Backend is not running at {self.base_url}.")
+
+        with BackendClient._backend_start_lock:
             try:
-                from backend.services.model_service import caption_model_service
-                if caption_model_service.model is None:
-                    caption_model_service.load()
-                self._direct_service = caption_model_service
-            except Exception:
-                self._direct_service = False
-        return self._direct_service if self._direct_service is not False else None
+                with self._http_client(timeout=1.5) as client:
+                    if client.get(f"{self.base_url}/health").status_code == 200:
+                        return
+            except httpx.RequestError:
+                pass
+
+            process = BackendClient._backend_process
+            if process is None or process.poll() is not None:
+                project_root = Path(__file__).resolve().parent.parent
+                log_path = project_root / "logs" / "backend_autostart.log"
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                command = [
+                    sys.executable,
+                    "-m", "uvicorn", "backend.main:app",
+                    "--host", "127.0.0.1", "--port", "8000", "--workers", "1",
+                ]
+                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                try:
+                    BackendClient._backend_log_handle = log_path.open("ab")
+                    BackendClient._backend_process = subprocess.Popen(
+                        command,
+                        cwd=project_root,
+                        stdin=subprocess.DEVNULL,
+                        stdout=BackendClient._backend_log_handle,
+                        stderr=subprocess.STDOUT,
+                        creationflags=creation_flags,
+                    )
+                except OSError as exc:
+                    raise RuntimeError(f"Could not start the local backend: {exc}") from exc
+
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                process = BackendClient._backend_process
+                if process is not None and process.poll() is not None:
+                    raise RuntimeError(
+                        "The local backend stopped while starting. See logs/backend_autostart.log "
+                        "for the startup error."
+                    )
+                try:
+                    with self._http_client(timeout=1.5) as client:
+                        if client.get(f"{self.base_url}/health").status_code == 200:
+                            return
+                except httpx.RequestError:
+                    pass
+                time.sleep(0.5)
+        raise RuntimeError(
+            f"The local backend did not start within {timeout / 60:.1f} minutes. "
+            "See logs/backend_autostart.log for details."
+        )
 
     def check_health(self) -> Tuple[bool, str]:
         """Check if backend server is responsive."""
         try:
-            with httpx.Client(timeout=2.0) as client:
+            with self._http_client(timeout=2.0) as client:
                 res = client.get(f"{self.base_url}/health")
                 if res.status_code == 200:
                     data = res.json()
@@ -64,7 +127,7 @@ class BackendClient:
     def check_ready(self) -> Tuple[bool, str]:
         """Check if model checkpoint is loaded and ready for inference."""
         try:
-            with httpx.Client(timeout=2.0) as client:
+            with self._http_client(timeout=2.0) as client:
                 res = client.get(f"{self.base_url}/ready")
                 if res.status_code == 200:
                     return True, "Model ready"
@@ -80,12 +143,7 @@ class BackendClient:
         show_attention: bool = True,
         timeout: float = 60.0,
     ) -> Dict[str, Any]:
-        """Upload an image to the backend.
-
-        1. Attempts HTTP backend (/api/upload).
-        2. If HTTP backend is not running, runs the real ViT model directly in-process!
-        3. If model checkpoint is unavailable, falls back to mock demo.
-        """
+        """Upload an image to the backend and propagate service errors to the UI."""
         p = Path(file_path)
         if not p.is_file():
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -99,72 +157,56 @@ class BackendClient:
         else:
             mime = "image/jpeg"
 
-        # 1. Attempt real HTTP API call first
-        backend_available = False
+        with open(p, "rb") as f:
+            files = {"file": (p.name, f.read(), mime)}
+        data = {"show_attention": "true" if show_attention else "false"}
+        self._ensure_backend(timeout=max(timeout, 180.0))
+        with self._http_client(timeout=timeout) as client:
+            response = client.post(f"{self.base_url}/api/upload", files=files, data=data)
+        self._raise_for_backend_error(response)
+        payload = response.json()
+        return payload.get("data", payload)
+
+    @staticmethod
+    def _raise_for_backend_error(response):
+        if response.is_success:
+            return
+        detail = f"Backend returned HTTP {response.status_code}."
         try:
-            with httpx.Client(timeout=2.0) as quick_client:
-                health_res = quick_client.get(f"{self.base_url}/health")
-                backend_available = health_res.status_code == 200
+            body = response.json()
+            detail = str(body.get("detail", detail))
         except Exception:
-            backend_available = False
+            if response.text:
+                detail = response.text
+        raise RuntimeError(detail)
 
-        if backend_available:
-            try:
-                with open(p, "rb") as f:
-                    file_bytes = f.read()
-                files = {"file": (p.name, file_bytes, mime)}
-                data = {"show_attention": "true" if show_attention else "false"}
+    def get_history(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        self._ensure_backend()
+        with self._http_client(timeout=15.0) as client:
+            response = client.get(f"{self.base_url}/api/history", params={"limit": limit, "offset": offset})
+        self._raise_for_backend_error(response)
+        return response.json().get("data", [])
 
-                with httpx.Client(timeout=timeout) as client:
-                    resp = client.post(
-                        f"{self.base_url}/api/upload",
-                        files=files,
-                        data=data,
-                    )
-                if resp.status_code == 200:
-                    payload = resp.json()
-                    return payload.get("data", payload)
+    def get_history_item(self, record_id: int) -> Dict[str, Any]:
+        self._ensure_backend()
+        with self._http_client(timeout=30.0) as client:
+            response = client.get(f"{self.base_url}/api/history/{record_id}")
+        self._raise_for_backend_error(response)
+        return response.json().get("data", {})
 
-                # If backend returned client error (400, 413, 429), raise so UI can report it
-                if resp.status_code in {400, 413, 422, 429}:
-                    err_msg = f"HTTP {resp.status_code}"
-                    try:
-                        err_data = resp.json()
-                        err_msg = err_data.get("detail", err_msg)
-                    except Exception:
-                        if resp.text:
-                            err_msg = resp.text
-                    raise RuntimeError(str(err_msg))
+    def get_history_image(self, record_id: int) -> bytes:
+        self._ensure_backend()
+        with self._http_client(timeout=30.0) as client:
+            response = client.get(f"{self.base_url}/api/history/{record_id}/image")
+        self._raise_for_backend_error(response)
+        return response.content
 
-                # If 503 (model checkpoint not loaded) or other known degraded state, fallback
-            except RuntimeError:
-                raise
-            except Exception:
-                pass
-
-        # 2. If HTTP backend server is not running, run real ViT model directly in-process
-        direct_service = self._get_direct_service()
-        if direct_service is not None:
-            try:
-                if show_attention and direct_service.supports_attention:
-                    caption, steps = direct_service.predict_with_attention(str(p))
-                else:
-                    caption = direct_service.predict(str(p))
-                    steps = []
-                return {
-                    "id": 1,
-                    "original_filename": p.name,
-                    "caption": caption,
-                    "attention": {
-                        "method": "vit_cross_attention" if direct_service.supports_attention else "none",
-                        "steps": steps,
-                    },
-                }
-            except Exception:
-                pass
-
-        # 3. Fallback to realistic mock result matching the design images
-        return self.generate_mock_result(file_path)
+    def regenerate_history_item(self, record_id: int) -> Dict[str, Any]:
+        self._ensure_backend(timeout=180.0)
+        with self._http_client(timeout=120.0) as client:
+            response = client.post(f"{self.base_url}/api/history/{record_id}/regenerate")
+        self._raise_for_backend_error(response)
+        return response.json().get("data", {})
 
     @staticmethod
     def _jet_colorize(heatmap: np.ndarray) -> np.ndarray:

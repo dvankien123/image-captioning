@@ -4,7 +4,7 @@ Handles:
 - When Caption Results Tab is Active (Images 1 & 2):
     - Top: ALTERNATIVE CAPTIONS
         - Empty state: 3 skeleton loading items
-        - Loaded state: 4 candidate captions with radio buttons and confidence scores
+    - Loaded state: model-ranked candidate captions with beam scores
     - Bottom: PROCESSING INFO
         - Rows: Words, Time, Device, Model, Beam size (empty dashes vs populated values)
 - When Attentions Tab is Active (Image 3):
@@ -12,8 +12,8 @@ Handles:
         - Flow layout of word token pills ('a', 'white', 'dog', 'runs', 'through', 'the', 'grass')
         - Active token highlighted in orange border and text
     - Middle: WHY THIS WORD?
-        - Context box ('a white dog ...')
-        - Probability distribution list for selected word ('dog' 91.2% SELECTED, etc.)
+        - Context box centered on the selected token
+        - Decoder next-token probabilities at that caption position
     - Bottom: Copy caption and Export action buttons
 """
 
@@ -157,7 +157,7 @@ class AltCaptionCard(QFrame):
 
     clicked = Signal(int, str)
 
-    def __init__(self, index: int, caption: str, score: float, selected: bool = False, parent: Optional[QWidget] = None):
+    def __init__(self, index: int, caption: str, score: Optional[float], selected: bool = False, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.index = index
         self.caption = caption
@@ -199,12 +199,13 @@ class AltCaptionCard(QFrame):
         if selected:
             self.setObjectName("altCardSelected")
             self.title_lbl.setStyleSheet("font-size: 11.5px; font-weight: 700; color: #0F172A;")
-            self.sub_lbl.setText(f"Score {self.score:.2f} · selected")
+            score_text = f"Beam score {self.score:.2f}" if self.score is not None else "Greedy decoding"
+            self.sub_lbl.setText(f"{score_text} · selected")
             self.sub_lbl.setStyleSheet("font-size: 10px; color: #3B82F6;")
         else:
             self.setObjectName("altCardNormal")
             self.title_lbl.setStyleSheet("font-size: 11.5px; font-weight: 500; color: #334155;")
-            self.sub_lbl.setText(f"Score {self.score:.2f}")
+            self.sub_lbl.setText(f"Beam score {self.score:.2f}" if self.score is not None else "Greedy decoding")
             self.sub_lbl.setStyleSheet("font-size: 10px; color: #94A3B8;")
 
         self.style().unpolish(self)
@@ -219,7 +220,7 @@ class AltCaptionCard(QFrame):
 class RightPanel(QFrame):
     """Right sidebar matching Images 1, 2, 3."""
 
-    caption_selected = Signal(str)
+    caption_selected = Signal(int, str)
     token_selected = Signal(int, str)
     copy_clicked = Signal(str)
     export_clicked = Signal()
@@ -232,8 +233,9 @@ class RightPanel(QFrame):
         self._active_tab: int = 0
         self._current_caption: str = ""
         self._tokens: List[str] = []
-        self._selected_token: str = "dog"
+        self._selected_token: str = ""
         self._selected_index: int = 0
+        self._token_distributions: List[List[Dict[str, Any]]] = []
 
         self._init_ui()
 
@@ -457,6 +459,7 @@ class RightPanel(QFrame):
                 w.deleteLater()
         self.token_buttons.clear()
         self._tokens = []
+        self._token_distributions = []
         self._selected_token = ""
         self._selected_index = 0
 
@@ -467,6 +470,7 @@ class RightPanel(QFrame):
         proc_info: Optional[Dict[str, str]] = None,
         steps: Optional[List[Dict[str, Any]]] = None,
         initial_index: Optional[int] = None,
+        selected_candidate: int = 0,
     ):
         """Populate right panel matching Image 2 & 3."""
         self._current_caption = caption
@@ -483,37 +487,28 @@ class RightPanel(QFrame):
                 w.deleteLater()
         self.alt_cards.clear()
 
-        if not alternatives:
-            # Realistic default candidate captions matching Image 2
-            alternatives = [
-                {"caption": "A white dog runs through the grass.", "score": 0.94},
-                {"caption": "A white dog running on the lawn.", "score": 0.81},
-                {"caption": "A dog jumping in a green field.", "score": 0.67},
-                {"caption": "A puppy playing outdoors.", "score": 0.52},
-            ]
-
         for i, alt in enumerate(alternatives):
             card = AltCaptionCard(
                 index=i,
                 caption=alt["caption"],
-                score=alt["score"],
-                selected=(i == 0),
+                score=alt.get("beam_score", alt.get("score")),
+                selected=(i == selected_candidate),
             )
             card.clicked.connect(self._on_alt_card_clicked)
             self.alt_cards.append(card)
             self.alt_cards_layout.addWidget(card)
 
-        self.alt_stack.setCurrentIndex(1)
+        self.alt_stack.setCurrentIndex(1 if alternatives else 0)
 
         # 2. Populate Processing Info
         info = proc_info or {}
         # Calculate word count without punctuation
         words_count = len([w for w in caption.replace(".", "").split() if w])
-        self.val_words.setText(str(info.get("words", words_count or 7)))
-        self.val_time.setText(info.get("time", "1.2 s"))
-        self.val_device.setText(info.get("device", "GPU"))
-        self.val_model.setText(info.get("model", "ViT + Transformer"))
-        self.val_beam.setText(str(info.get("beam_size", "4")))
+        self.val_words.setText(str(info.get("words", words_count if caption else "—")))
+        self.val_time.setText(info.get("time", "—"))
+        self.val_device.setText(info.get("device", "—"))
+        self.val_model.setText(info.get("model", "—"))
+        self.val_beam.setText(str(info.get("beam_size", "—")))
 
         # 3. Populate Caption Token Pills for Attentions Tab
         self._populate_tokens(caption, steps=steps, initial_index=initial_index)
@@ -535,20 +530,17 @@ class RightPanel(QFrame):
         # Extract tokens from steps if available to ensure 1-to-1 parity with AttentionsView
         if steps:
             tokens = [s.get("word", "") for s in steps if s.get("word") is not None]
+            self._token_distributions = [s.get("next_tokens", []) for s in steps]
         else:
             clean = caption.strip()
             tokens = [w for w in clean.replace(".", "").split() if w]
+            self._token_distributions = [[] for _ in tokens]
         self._tokens = tokens
 
         # Determine initial selected index
         target_idx = 0
         if initial_index is not None and 0 <= initial_index < len(tokens):
             target_idx = initial_index
-        elif "dog" in [t.lower() for t in tokens]:
-            for i, t in enumerate(tokens):
-                if t.lower() == "dog":
-                    target_idx = i
-                    break
         elif tokens:
             target_idx = 0
         else:
@@ -635,52 +627,10 @@ class RightPanel(QFrame):
             else:
                 ctx_text = f'{lead}<b style="color:#EA580C;">{word}</b>{trail}'
             self.why_context_lbl.setText(ctx_text)
-        elif word == "dog":
-            self.why_context_lbl.setText('a white <b style="color:#EA580C;">dog</b> ...')
-        elif word == "grass":
-            self.why_context_lbl.setText('through the <b style="color:#EA580C;">grass</b>')
-        elif word == "runs":
-            self.why_context_lbl.setText('dog <b style="color:#EA580C;">runs</b> through ...')
         else:
             self.why_context_lbl.setText(f'... <b style="color:#EA580C;">{word}</b> ...')
 
-        low_word = word.lower()
-        if low_word == "dog":
-            candidates = [
-                {"word": "dog", "prob": 91.2, "selected": True},
-                {"word": "puppy", "prob": 4.1, "selected": False},
-                {"word": "animal", "prob": 2.3, "selected": False},
-                {"word": "cat", "prob": 1.2, "selected": False},
-                {"word": "wolf", "prob": 0.6, "selected": False},
-                {"word": "horse", "prob": 0.3, "selected": False},
-            ]
-        elif low_word == "grass":
-            candidates = [
-                {"word": "grass", "prob": 88.4, "selected": True},
-                {"word": "lawn", "prob": 6.2, "selected": False},
-                {"word": "field", "prob": 3.1, "selected": False},
-                {"word": "yard", "prob": 1.5, "selected": False},
-                {"word": "park", "prob": 0.5, "selected": False},
-                {"word": "meadow", "prob": 0.3, "selected": False},
-            ]
-        elif low_word == "runs":
-            candidates = [
-                {"word": "runs", "prob": 84.7, "selected": True},
-                {"word": "running", "prob": 9.5, "selected": False},
-                {"word": "walks", "prob": 3.2, "selected": False},
-                {"word": "plays", "prob": 1.6, "selected": False},
-                {"word": "jumps", "prob": 0.8, "selected": False},
-                {"word": "stands", "prob": 0.2, "selected": False},
-            ]
-        else:
-            candidates = [
-                {"word": word, "prob": 89.5, "selected": True},
-                {"word": "similar", "prob": 5.4, "selected": False},
-                {"word": "other", "prob": 2.8, "selected": False},
-                {"word": "alt", "prob": 1.5, "selected": False},
-                {"word": "item", "prob": 0.5, "selected": False},
-                {"word": "part", "prob": 0.3, "selected": False},
-            ]
+        candidates = self._token_distributions[index] if 0 <= index < len(self._token_distributions) else []
 
         # Render candidates
         while self.why_bars_layout.count():
@@ -700,7 +650,7 @@ class RightPanel(QFrame):
 
             # Word label
             w_lbl = QLabel(c["word"])
-            if c["selected"]:
+            if c.get("selected", False):
                 w_lbl.setStyleSheet("font-size: 11.5px; font-weight: 700; color: #EA580C;")
             else:
                 w_lbl.setStyleSheet("font-size: 11.5px; font-weight: 500; color: #334155;")
@@ -709,15 +659,16 @@ class RightPanel(QFrame):
             top_row.addStretch()
 
             # Percentage label
-            p_lbl = QLabel(f"{c['prob']:.1f}%")
-            if c["selected"]:
+            probability = float(c.get("probability", c.get("prob", 0.0)))
+            p_lbl = QLabel(f"{probability * 100:.1f}%")
+            if c.get("selected", False):
                 p_lbl.setStyleSheet("font-size: 11px; font-weight: 700; color: #EA580C;")
             else:
                 p_lbl.setStyleSheet("font-size: 11px; color: #64748B;")
             top_row.addWidget(p_lbl)
 
             # SELECTED badge
-            if c["selected"]:
+            if c.get("selected", False):
                 badge = QLabel("SELECTED")
                 badge.setObjectName("selectedBadge")
                 top_row.addWidget(badge)
@@ -725,9 +676,9 @@ class RightPanel(QFrame):
             col.addLayout(top_row)
 
             # Bar
-            bar_color = "#EA580C" if c["selected"] else "#CBD5E1"
-            bar_h = 4 if c["selected"] else 3
-            bar = MiniProgressBar(c["prob"], color=bar_color, height=bar_h)
+            bar_color = "#EA580C" if c.get("selected", False) else "#CBD5E1"
+            bar_h = 4 if c.get("selected", False) else 3
+            bar = MiniProgressBar(probability * 100, color=bar_color, height=bar_h)
             col.addWidget(bar)
 
             self.why_bars_layout.addWidget(row_wrap)
@@ -735,7 +686,7 @@ class RightPanel(QFrame):
     def _on_alt_card_clicked(self, index: int, caption: str):
         for i, card in enumerate(self.alt_cards):
             card.update_selection(i == index)
-        self.caption_selected.emit(caption)
+        self.caption_selected.emit(index, caption)
 
     def _on_copy_att(self):
         if self._current_caption:

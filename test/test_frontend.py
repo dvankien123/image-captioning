@@ -17,6 +17,34 @@ from frontend.motion import SlidingTabPill, prefers_reduced_motion
 from frontend.styles import APP_STYLE
 
 
+@pytest.fixture(autouse=True)
+def disable_startup_network_history(monkeypatch):
+    monkeypatch.setattr(MainWindow, "_load_history", lambda self: None)
+
+
+def _candidate(caption, words):
+    tokens = [{
+        "word": word,
+        "image": "",
+        "next_tokens": [
+            {"word": word, "probability": 0.8, "selected": True},
+            {"word": "other", "probability": 0.1, "selected": False},
+        ],
+    } for word in words]
+    return {"caption": caption, "beam_score": -1.0, "tokens": tokens}
+
+
+def _result(caption, words):
+    candidates = [_candidate(caption, words)]
+    steps = [{"word": token["word"], "image": token["image"]} for token in candidates[0]["tokens"]]
+    return {
+        "caption": caption,
+        "candidates": candidates,
+        "attention": {"method": "vit_cross_attention", "steps": steps},
+        "metadata": {"model": "ViT test", "device": "cpu", "beam_size": 4, "elapsed_ms": 1200},
+    }
+
+
 @pytest.fixture(scope="session")
 def qapp():
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -90,7 +118,12 @@ def test_file_load_and_caption_results(qapp):
     caption = "A white dog runs through the grass."
     tokens = ["a", "white", "dog", "runs", "through", "the", "grass", "."]
     steps = [{"word": w, "image": ""} for w in tokens]
-    result = {"caption": caption, "attention": {"steps": steps}}
+    result = _result(caption, tokens)
+    result["candidates"].extend([
+        _candidate("A white dog running through grass.", tokens),
+        _candidate("A dog runs outside.", tokens),
+        _candidate("A dog on the grass.", tokens),
+    ])
 
     win._current_file_path = str(sample_img)
     win._current_pixmap = QPixmap(str(sample_img))
@@ -192,7 +225,7 @@ def test_tab_switching_and_attention_interaction(qapp):
     caption = "A white dog runs through the grass."
     tokens = ["a", "white", "dog", "runs", "through", "the", "grass", "."]
     steps = [{"word": w, "image": ""} for w in tokens]
-    result = {"caption": caption, "attention": {"steps": steps}}
+    result = _result(caption, tokens)
 
     win._current_file_path = str(sample_img)
     win._current_pixmap = QPixmap(str(sample_img))
@@ -208,8 +241,8 @@ def test_tab_switching_and_attention_interaction(qapp):
     assert win.right_panel.tab_stack.currentIndex() == 1
 
     # Check that 'dog' is active in AttentionsView and RightPanel
-    assert "dog" in win.attentions_view.overlay_widget.badge.text().lower()
-    assert win.right_panel._selected_token == "dog"
+    assert "a" in win.attentions_view.overlay_widget.badge.text().lower()
+    assert win.right_panel._selected_token == "a"
 
     # Select another word via right panel token
     win.right_panel.set_selected_token("grass")
@@ -380,7 +413,7 @@ def test_image_replacement_during_generation_no_caption_mixup(qapp, tmp_path):
 
     # Image A's result must be safely cached, BUT MUST NOT overwrite active UI of Image B!
     assert imgA in win._results_cache
-    assert "apple" in win._results_cache[imgA]["caption"].lower()
+    assert "apple" in win._results_cache[imgA]["result"]["caption"].lower()
     # The active UI must NOT show Apple caption! It still displays Image B's loading state
     assert "apple" not in win.caption_view.lbl_caption.text().lower()
 
@@ -391,7 +424,7 @@ def test_image_replacement_during_generation_no_caption_mixup(qapp, tmp_path):
 
     # Now Image B's UI receives its own correct Banana caption!
     assert "banana" in win.caption_view.lbl_caption.text().lower()
-    assert "banana" in win._results_cache[imgB]["caption"].lower()
+    assert "banana" in win._results_cache[imgB]["result"]["caption"].lower()
 
     # 5. User clicks Image A in history -> instantly shows Apple!
     win._on_file_selected(imgA)
@@ -482,7 +515,11 @@ def test_repeated_tokens_independent_selection_and_attention(qapp, tmp_path):
     win._current_file_path = img_path
     win._current_pixmap = QPixmap(img_path)
     win.left_panel.set_loaded_file(img_path)
-    win._on_inference_finished(img_path, {"caption": caption, "attention": {"steps": steps}}, 1.0)
+    win._on_inference_finished(
+        img_path,
+        {"caption": caption, "attention": {"method": "vit_cross_attention", "steps": steps}},
+        1.0,
+    )
     qapp.processEvents()
 
     # Switch to Attentions tab
@@ -546,5 +583,66 @@ def test_repeated_tokens_independent_selection_and_attention(qapp, tmp_path):
     assert win.attentions_view._current_index == 12
     assert win.attentions_view._card_widgets[12].selected is True
     assert win.attentions_view._card_widgets[7].selected is False
+    win.close()
 
+
+def test_persistent_history_restores_result_and_selection(qapp, tmp_path):
+    win = MainWindow()
+    image_path = tmp_path / "saved.png"
+    pixmap = QPixmap(80, 60)
+    pixmap.fill(Qt.green)
+    pixmap.save(str(image_path))
+
+    first = _candidate("A green image.", ["a", "green", "image"])
+    second = _candidate("Green image outdoors.", ["green", "image", "outdoors"])
+    result = _result(first["caption"], ["a", "green", "image"])
+    result["candidates"] = [first, second]
+    record = {
+        **result,
+        "id": 42,
+        "original_filename": "saved.png",
+        "created_at": "2026-11-03T10:00:00+00:00",
+        "has_image": True,
+    }
+
+    win._apply_record_result(record, pixmap)
+    assert win._current_record_id == 42
+    assert "green" in win.caption_view.lbl_caption.text().lower()
+    win._on_alt_caption_selected(1, second["caption"])
+    assert win._current_caption == second["caption"]
+    assert win.right_panel._tokens == ["green", "image", "outdoors"]
+    assert win.attentions_view._steps[0]["word"] == "green"
+    win.close()
+
+
+def test_sidebar_selects_server_history_entry(qapp):
+    panel = LeftPanel()
+    selected = []
+    panel.history_item_selected.connect(selected.append)
+    panel.set_persistent_history([{
+        "id": 7,
+        "original_filename": "remote.png",
+        "caption": "A remote image.",
+        "thumbnail": None,
+    }])
+    assert len(panel.hist_slots) == 1
+    panel.hist_slots[0].clicked.emit(0)
+    assert selected == [7]
+
+
+def test_inference_error_does_not_show_demo_caption(qapp, tmp_path, monkeypatch):
+    from frontend.main_window import QMessageBox
+
+    messages = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: messages.append(args[-1]))
+    win = MainWindow()
+    image_path = str(tmp_path / "error.png")
+    pixmap = QPixmap(20, 20)
+    pixmap.fill(Qt.red)
+    pixmap.save(image_path)
+    win._current_file_path = image_path
+    win._current_pixmap = QPixmap(image_path)
+    win._on_inference_failed(image_path, "backend offline", 0.1)
+    assert "Caption unavailable" in win.caption_view.lbl_caption.text()
+    assert messages == ["backend offline"]
     win.close()

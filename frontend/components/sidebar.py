@@ -183,6 +183,7 @@ class LeftPanel(QFrame):
     """Left sidebar faithfully matching Images 1, 2, 3."""
 
     file_selected = Signal(str)
+    history_item_selected = Signal(int)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -527,6 +528,44 @@ class LeftPanel(QFrame):
         self._rebuild_history_widgets()
         self.set_active_history(0)
 
+    def set_persistent_history(self, records: List[Dict[str, Any]]):
+        """Replace the session list with server-backed history entries."""
+        self._history_items = []
+        for record in records:
+            pixmap = QPixmap()
+            thumbnail = record.get("thumbnail") or ""
+            if thumbnail.startswith("data:image") and "," in thumbnail:
+                import base64
+                pixmap.loadFromData(base64.b64decode(thumbnail.split(",", 1)[1]))
+            self._history_items.append({
+                "record_id": record.get("id"),
+                "filename": record.get("original_filename", "Image"),
+                "caption": record.get("caption", ""),
+                "pixmap": pixmap,
+            })
+        self._active_history_idx = -1
+        self._rebuild_history_widgets()
+
+    def set_loaded_history_record(self, record_id: int, filename: str, pixmap: QPixmap):
+        """Show a restored server history item in the existing upload summary."""
+        for index, item in enumerate(self._history_items):
+            if item.get("record_id") == record_id:
+                self.set_active_history(index)
+                break
+        display_name = filename if len(filename) <= 19 else filename[:10] + "..." + filename[-6:]
+        self.cur_filename_lbl.setText(display_name)
+        self.cur_filename_lbl.setToolTip(filename)
+        extension = Path(filename).suffix.lower().lstrip(".")
+        self.badge_ext.setText(extension.upper() if extension else "IMG")
+        self.badge_dim.setText(f"{pixmap.width()}×{pixmap.height()}" if not pixmap.isNull() else "Unknown")
+        self.badge_size.setText("Saved")
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(48, 48, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            x = max(0, (scaled.width() - 48) // 2)
+            y = max(0, (scaled.height() - 48) // 2)
+            self.cur_thumb_lbl.setPixmap(make_rounded_pixmap(scaled.copy(x, y, 48, 48), radius=8))
+        self.upload_stack.setCurrentIndex(1)
+
     def _rebuild_history_widgets(self):
         """Rebuild thumbnail widgets to display strictly the exact count."""
         while self.hist_row.count():
@@ -551,7 +590,7 @@ class LeftPanel(QFrame):
             thumb = HistoryThumbnailWidget(
                 index=i,
                 pixmap=item.get("pixmap", QPixmap()),
-                file_path=item.get("path", ""),
+                file_path=item.get("filename", item.get("path", "")),
                 selected=(i == self._active_history_idx),
             )
             thumb.clicked.connect(self._on_history_item_clicked)
@@ -573,6 +612,10 @@ class LeftPanel(QFrame):
     def _on_history_item_clicked(self, index: int):
         if 0 <= index < len(self._history_items):
             self.set_active_history(index)
+            record_id = self._history_items[index].get("record_id")
+            if record_id is not None:
+                self.history_item_selected.emit(int(record_id))
+                return
             fpath = self._history_items[index].get("path")
             if fpath and Path(fpath).is_file():
                 self.file_selected.emit(fpath)

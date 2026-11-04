@@ -25,7 +25,7 @@ from PySide6.QtCore import QEvent, QThread, Qt, Signal
 from PySide6.QtGui import (
     QDragEnterEvent,
     QDropEvent,
-    QImage,
+    QIcon,
     QKeySequence,
     QPixmap,
     QShortcut,
@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QStackedWidget,
     QVBoxLayout,
@@ -74,6 +75,22 @@ class InferenceWorker(QThread):
             self.failed.emit(self.file_path, str(exc), elapsed)
 
 
+class ApiWorker(QThread):
+    result_ready = Signal(str, object)
+    failed = Signal(str, str)
+
+    def __init__(self, task_name: str, callback, parent=None):
+        super().__init__(parent)
+        self.task_name = task_name
+        self.callback = callback
+
+    def run(self):
+        try:
+            self.result_ready.emit(self.task_name, self.callback())
+        except Exception as exc:
+            self.failed.emit(self.task_name, str(exc))
+
+
 class MainWindow(QMainWindow):
     """Main window reproducing Images 1, 2, and 3 faithfully."""
 
@@ -86,17 +103,25 @@ class MainWindow(QMainWindow):
         self._current_pixmap: Optional[QPixmap] = None
         self._current_caption: str = ""
         self._current_steps: List[Dict[str, Any]] = []
+        self._current_result: Dict[str, Any] = {}
+        self._current_record_id: Optional[int] = None
+        self._requested_history_id: Optional[int] = None
+        self._selected_candidate_idx = 0
         self._active_tab_index: int = 0
         # In-memory session cache only (only holds items present in history)
         self._results_cache: Dict[str, Dict[str, Any]] = {}
+        self._api_workers = set()
 
-        self.setWindowTitle("Image Captioning")
+        self.setWindowTitle("Att Captioner")
+        self._icon_path = str(Path(__file__).resolve().parent.parent / "icon" / "Att-Captioner-Icon.png")
+        self.setWindowIcon(QIcon(self._icon_path))
         self.resize(1024, 640)
         self.setMinimumSize(960, 600)
         self.setAcceptDrops(True)
 
         self._init_ui()
         self._setup_shortcuts()
+        self._load_history()
 
     def _init_ui(self):
         central_widget = QWidget()
@@ -115,14 +140,8 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(20, 0, 20, 0)
         header_layout.setSpacing(12)
 
-        # Gradient App Logo
-        self.logo_lbl = QLabel()
-        self.logo_lbl.setPixmap(create_app_logo_icon(28))
-        self.logo_lbl.setFixedSize(28, 28)
-        header_layout.addWidget(self.logo_lbl)
-
         # App Title Text
-        self.title_lbl = QLabel("Image Captioning")
+        self.title_lbl = QLabel("ATT Captioner")
         self.title_lbl.setObjectName("appTitle")
         header_layout.addWidget(self.title_lbl)
 
@@ -139,6 +158,7 @@ class MainWindow(QMainWindow):
         # Column 1: Left Panel (Sidebar)
         self.left_panel = LeftPanel()
         self.left_panel.file_selected.connect(self._on_file_selected)
+        self.left_panel.history_item_selected.connect(self._on_history_item_selected)
         body_layout.addWidget(self.left_panel, 0)
 
         # Column 2: Center Panel (Main Area with Tabs)
@@ -207,6 +227,62 @@ class MainWindow(QMainWindow):
         """Setup Ctrl+V shortcut to paste image from clipboard."""
         self.paste_shortcut = QShortcut(QKeySequence.Paste, self)
         self.paste_shortcut.activated.connect(self._on_paste_clipboard)
+
+    def _run_api_task(self, name: str, callback):
+        worker = ApiWorker(name, callback, self)
+        worker.result_ready.connect(self._on_api_result)
+        worker.failed.connect(self._on_api_failed)
+        worker.finished.connect(lambda worker=worker: self._api_workers.discard(worker))
+        self._api_workers.add(worker)
+        worker.start()
+
+    def _load_history(self):
+        self._run_api_task("history_list", lambda: self.backend_client.get_history(limit=100))
+
+    def _on_history_item_selected(self, record_id: int):
+        self._requested_history_id = record_id
+        self._current_file_path = None
+        self._current_record_id = None
+        self.right_panel.setEnabled(True)
+        def load_item():
+            record = self.backend_client.get_history_item(record_id)
+            image = self.backend_client.get_history_image(record_id) if record.get("has_image") else None
+            return record, image
+        self._run_api_task(f"history_item:{record_id}", load_item)
+
+    def _on_api_result(self, task_name: str, payload):
+        if task_name == "history_list":
+            self.left_panel.set_persistent_history(payload)
+            return
+        if task_name.startswith("history_item:"):
+            record, image_data = payload
+            if record.get("id") != self._requested_history_id:
+                return
+            pixmap = QPixmap()
+            if image_data:
+                pixmap.loadFromData(image_data)
+            self._apply_record_result(record, pixmap)
+            return
+        if task_name.startswith("regenerate:"):
+            self.right_panel.setEnabled(True)
+            record, image = payload
+            if record.get("id") != self._current_record_id:
+                return
+            pixmap = QPixmap()
+            pixmap.loadFromData(image)
+            self._apply_record_result(record, pixmap)
+            self._load_history()
+
+    def _on_api_failed(self, task_name: str, message: str):
+        if task_name == "history_list":
+            self.left_panel.set_persistent_history([])
+        else:
+            if task_name.startswith("history_item:") and int(task_name.split(":", 1)[1]) != self._requested_history_id:
+                return
+            if task_name.startswith("regenerate:") and int(task_name.split(":", 1)[1]) != self._current_record_id:
+                return
+            self.right_panel.setEnabled(True)
+            QMessageBox.warning(self, "Image captioning failed", message)
 
     def _on_paste_clipboard(self):
         """Handle pasting image from clipboard (Ctrl+V)."""
@@ -295,37 +371,70 @@ class MainWindow(QMainWindow):
                     self.tab_pill.snap_to(target_btn.x(), target_btn.width())
         return super().eventFilter(obj, event)
 
+    def _render_result(self, result: Dict[str, Any], candidate_index: int = 0):
+        candidates = result.get("candidates") or []
+        candidate_index = min(candidate_index, max(0, len(candidates) - 1))
+        candidate = candidates[candidate_index] if candidates else {}
+        caption = candidate.get("caption") or result.get("caption", "")
+        attention = result.get("attention") or {}
+        tokens = candidate.get("tokens") or attention.get("steps", [])
+        metadata = result.get("metadata") or {}
+        self._current_result = result
+        self._selected_candidate_idx = candidate_index
+        self._current_caption = caption.strip()
+        self._current_steps = tokens
+
+        if self._current_pixmap and not self._current_pixmap.isNull():
+            self.caption_view.set_content(self._current_pixmap, self._current_caption)
+            if attention.get("method") == "vit_cross_attention" and tokens:
+                self.attentions_view.set_content(self._current_pixmap, tokens, initial_index=0)
+            else:
+                self.attentions_view.show_empty()
+
+        elapsed_ms = metadata.get("elapsed_ms")
+        proc_info = {
+            "words": str(len(tokens) if tokens else len(caption.split())),
+            "time": f"{float(elapsed_ms) / 1000:.2f} s" if elapsed_ms is not None else "—",
+            "device": metadata.get("device", "—"),
+            "model": metadata.get("model", "—"),
+            "beam_size": metadata.get("beam_size", "—"),
+        }
+        self.right_panel.set_loaded_content(
+            self._current_caption,
+            alternatives=candidates,
+            proc_info=proc_info,
+            steps=tokens,
+            selected_candidate=candidate_index,
+        )
+
+    def _apply_record_result(self, record: Dict[str, Any], pixmap: QPixmap):
+        self._current_record_id = record.get("id")
+        self._current_file_path = None
+        self._current_pixmap = pixmap
+        self._render_result(record)
+        self.left_panel.set_loaded_history_record(
+            self._current_record_id,
+            record.get("original_filename", "Image"),
+            pixmap,
+        )
+
     def _prune_cache_to_history(self):
-        """Release memory by retaining only cached items that exist in the active history."""
         history_paths = {item["path"] for item in self.left_panel._history_items if "path" in item}
-        to_remove = [p for p in self._results_cache if p not in history_paths]
-        for p in to_remove:
-            self._results_cache.pop(p, None)
+        self._results_cache = {path: value for path, value in self._results_cache.items() if path in history_paths}
 
     def _apply_cached_results(self, cached: Dict[str, Any]):
-        """Instantly apply pre-computed results without re-inference lag."""
-        clean_cap = cached.get("caption", "")
-        steps = cached.get("steps", [])
-        proc_info = cached.get("proc_info", {})
-        alts = cached.get("alternatives", [])
-
-        self._current_caption = clean_cap
-        self._current_steps = steps
-
-        # Update CaptionResultsView (Center panel page 0)
-        if self._current_pixmap:
-            self.caption_view.set_content(self._current_pixmap, clean_cap)
-
-        # Update AttentionsView (Center panel page 1)
-        if self._current_pixmap:
-            self.attentions_view.set_content(self._current_pixmap, steps, initial_word="dog")
-
-        # Update RightPanel (Both page 0 and page 1)
-        self.right_panel.set_loaded_content(clean_cap, alternatives=alts, proc_info=proc_info, steps=steps)
+        self._current_result = cached.get("result", {})
+        self._current_record_id = self._current_result.get("id")
+        self._render_result(self._current_result, cached.get("selected_candidate", 0))
 
     def _on_file_selected(self, file_path: str):
         """User uploaded or chose an image file."""
+        self._requested_history_id = None
+        self.right_panel.setEnabled(True)
         self._current_file_path = file_path
+        self._current_record_id = None
+        self._current_result = {}
+        self._selected_candidate_idx = 0
         self._current_pixmap = QPixmap(file_path)
 
         # Update left panel immediately
@@ -368,89 +477,25 @@ class MainWindow(QMainWindow):
             result = kwargs.get("result", {})
             elapsed = kwargs.get("elapsed", 0.0)
 
-        caption = result.get("caption", "A white dog runs through the grass.")
-        attention = result.get("attention") or {}
-        steps = attention.get("steps", [])
-
-        # Clean caption
-        clean_cap = caption.strip()
-
-        # Determine processing info
-        words_count = len([w for w in clean_cap.replace(".", "").split() if w])
-        time_str = f"{elapsed:.1f} s" if elapsed > 0.05 else "1.2 s"
-
-        device_str = "GPU"
-        try:
-            import torch
-            device_str = "GPU" if torch.cuda.is_available() else "GPU"
-        except Exception:
-            device_str = "GPU"
-
-        proc_info = {
-            "words": str(words_count),
-            "time": time_str,
-            "device": device_str,
-            "model": "ViT + Transformer",
-            "beam_size": "4",
-        }
-
-        # Build realistic candidate captions matching the image content
-        alts = self._build_candidate_captions(clean_cap)
-
-        # Cache results under its own file_path in memory for active history items
+        result.setdefault("metadata", {}).setdefault("elapsed_ms", round(elapsed * 1000, 1))
         if file_path:
             self._results_cache[file_path] = {
-                "caption": clean_cap,
-                "steps": steps,
-                "proc_info": proc_info,
-                "alternatives": alts,
                 "result": result,
-                "elapsed": elapsed,
             }
             self._prune_cache_to_history()
+        self._load_history()
 
         # CRITICAL FIX: If the user replaced or navigated away to another image while
         # this one was generating, do NOT overwrite the currently active UI with this old result!
         if file_path != self._current_file_path:
             return
 
-        self._current_caption = clean_cap
-        self._current_steps = steps
-
-        # Update CaptionResultsView (Center panel page 0)
-        if self._current_pixmap:
-            self.caption_view.set_content(self._current_pixmap, clean_cap)
-
-        # Update AttentionsView (Center panel page 1)
-        if self._current_pixmap:
-            self.attentions_view.set_content(self._current_pixmap, steps, initial_word="dog")
-
-        # Update RightPanel (Both page 0 and page 1)
-        self.right_panel.set_loaded_content(clean_cap, alternatives=alts, proc_info=proc_info, steps=steps)
-
-    def _build_candidate_captions(self, base_caption: str) -> List[Dict[str, Any]]:
-        """Generate alternative captions matching the style of Image 2."""
-        clean = base_caption.strip()
-        if "dog" in clean.lower():
-            return [
-                {"caption": "A white dog runs through the grass.", "score": 0.94},
-                {"caption": "A white dog running on the lawn.", "score": 0.81},
-                {"caption": "A dog jumping in a green field.", "score": 0.67},
-                {"caption": "A puppy playing outdoors.", "score": 0.52},
-            ]
-        else:
-            first_letter_cap = clean[0].upper() + clean[1:] if clean else "Image"
-            if not first_letter_cap.endswith("."):
-                first_letter_cap += "."
-            return [
-                {"caption": first_letter_cap, "score": 0.94},
-                {"caption": f"A close up view of {clean.lower()}.", "score": 0.82},
-                {"caption": f"An outdoor scene showing {clean.lower()}.", "score": 0.68},
-                {"caption": f"A photo of {clean.lower()}.", "score": 0.51},
-            ]
+        self._current_record_id = result.get("id")
+        self._current_result = result
+        self._render_result(result)
 
     def _on_inference_failed(self, *args, **kwargs):
-        """Gracefully fallback to realistic demo data if offline or unavailable."""
+        """Report backend failures without replacing them with demo output."""
         if len(args) == 3:
             file_path, error_message, elapsed = args
         elif len(args) == 2:
@@ -462,16 +507,20 @@ class MainWindow(QMainWindow):
             error_message = kwargs.get("error_message", "Inference error")
             elapsed = kwargs.get("elapsed", 0.0)
 
-        if file_path:
-            fallback = self.backend_client.generate_mock_result(file_path)
-            self._on_inference_finished(file_path, fallback, elapsed)
+        if file_path != self._current_file_path:
+            return
+        self.caption_view.set_content(self._current_pixmap, "Caption unavailable")
+        self.right_panel.set_empty_state()
+        self.attentions_view.show_empty()
+        QMessageBox.warning(self, "Image captioning failed", error_message)
 
-    def _on_alt_caption_selected(self, new_caption: str):
-        """User selected an alternative caption from right panel radio options."""
-        self._current_caption = new_caption
-        self.caption_view.update_caption_text(new_caption)
-        if self._current_file_path and self._current_file_path in self._results_cache:
-            self._results_cache[self._current_file_path]["caption"] = new_caption
+    def _on_alt_caption_selected(self, index: int, _caption: str):
+        """Switch all token-level views to the selected model candidate."""
+        if not self._current_result:
+            return
+        self._render_result(self._current_result, candidate_index=index)
+        if self._current_file_path in self._results_cache:
+            self._results_cache[self._current_file_path]["selected_candidate"] = index
 
     def _on_attention_word_selected(self, index: int, word: str):
         """User selected a word thumbnail from bottom carousel in AttentionsView."""
@@ -485,8 +534,18 @@ class MainWindow(QMainWindow):
             self.attentions_view.select_word_by_name(index)
 
     def _on_regenerate(self):
-        """Re-run captioning on current image (invalidating in-memory cache)."""
-        if self._current_file_path:
+        """Re-run captioning and update the existing saved record when possible."""
+        if self._current_record_id is not None:
+            record_id = self._current_record_id
+            self.right_panel.setEnabled(False)
+            self._run_api_task(
+                f"regenerate:{record_id}",
+                lambda: (
+                    (record := self.backend_client.regenerate_history_item(record_id)),
+                    self.backend_client.get_history_image(record_id),
+                ),
+            )
+        elif self._current_file_path:
             self._results_cache.pop(self._current_file_path, None)
             self._on_file_selected(self._current_file_path)
 
@@ -505,16 +564,21 @@ class MainWindow(QMainWindow):
                 p = Path(save_path)
                 if p.suffix.lower() == ".json":
                     import json
+                    candidates = self._current_result.get("candidates") or []
+                    candidate = candidates[self._selected_candidate_idx] if self._selected_candidate_idx < len(candidates) else {}
                     data = {
-                        "file": self._current_file_path,
+                        "file": self._current_result.get("original_filename") or self._current_file_path,
                         "caption": self._current_caption,
-                        "timestamp": time.time(),
+                        "created_at": self._current_result.get("created_at"),
+                        "beam_score": candidate.get("beam_score"),
+                        "tokens": candidate.get("tokens", []),
+                        "metadata": self._current_result.get("metadata", {}),
                     }
                     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
                 else:
                     p.write_text(self._current_caption, encoding="utf-8")
-            except Exception:
-                pass
+            except Exception as exc:
+                QMessageBox.warning(self, "Export failed", str(exc))
 
     def closeEvent(self, event):
         """Release in-memory cache and clean up session on window close."""
