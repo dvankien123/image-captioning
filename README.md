@@ -9,22 +9,18 @@ From the repository root in PowerShell, create the virtual environment and insta
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --index-url https://download.pytorch.org/whl/cu126 --extra-index-url https://pypi.org/simple -r backend\requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Install the root `requirements.txt` as well if you need the training notebooks.
+The root `requirements.txt` includes backend, frontend, and training dependencies. Choose a PyTorch build compatible with the machine's CPU or CUDA setup.
 
-Trained checkpoints should be placed at `checkpoints/best_model.pth`. Set `MODEL_CHECKPOINT` in the root `.env` file if you wish to use a different checkpoint path.
+The backend loads the ViT-Transformer checkpoint at `checkpoints/best_model_coco.pth` by default. Set `MODEL_CHECKPOINT` in the root `.env` file to use a different checkpoint. If the configured file is missing or invalid, the API starts in degraded mode and reports the problem through `/ready`.
+
+Backend settings are read from environment variables and the root `.env` file. The root `config.yaml` configures the training, prediction, and evaluation scripts.
 
 ## Run
 
 To start the backend server:
-
-```powershell
-.\run_backend.bat
-```
-
-Or manually:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
@@ -66,8 +62,8 @@ Example response when `show_attention=true`:
 
 Attention overlays use the decoder's learned cross-attention weights over the
 ViT image patches. They are generated only when requested; normal caption
-inference avoids producing and encoding overlays.
+inference does not request or encode attention weights.
 
-Image uploads are validated by actual image format and limited to 20 megapixels by default. Inference runs off the event loop and is serialized by default to keep CPU/GPU memory stable; requests waiting more than 30 seconds receive HTTP 429. The default decoding strategy is beam search with width 3. Tune `DECODING_METHOD` (`beam` or `greedy`), `BEAM_SIZE`, `MAX_FILE_SIZE_MB`, `MAX_IMAGE_PIXELS`, `MAX_CONCURRENT_INFERENCES`, and `INFERENCE_QUEUE_TIMEOUT_SECONDS` in the root `.env` file as needed.
+Image uploads are validated by actual image format and limited to 20 megapixels by default. Inference runs off the event loop and is serialized by default to keep CPU/GPU memory stable; requests waiting more than 30 seconds receive HTTP 429. The default decoding strategy is beam search with width 3 and returns up to four candidates, limited by the configured beam size. Tune `DECODING_METHOD` (`beam` or `greedy`), `BEAM_SIZE`, `MAX_FILE_SIZE_MB`, `MAX_IMAGE_PIXELS`, `MAX_CONCURRENT_INFERENCES`, and `INFERENCE_QUEUE_TIMEOUT_SECONDS` in the root `.env` file as needed. History is capped at 100 records by default.
 
-Without a trained checkpoint the API starts in degraded mode. Health remains available, readiness and image uploads return HTTP 503. Inference also requires the packages listed in backend/requirements.txt.
+Without a usable configured checkpoint the API starts in degraded mode. Health and history remain available; readiness and image uploads return HTTP 503. The frontend launcher starts the local backend automatically when it is not already running.
