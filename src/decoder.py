@@ -162,7 +162,7 @@ class Decoder(nn.Module):
 
         return predictions, last_alphas
 
-    def forward_step(self, encoder_out, current_tokens):
+    def forward_step(self, encoder_out, current_tokens, return_alphas=False):
         """Run a single forward pass given currently generated tokens.
 
         Args:
@@ -171,7 +171,7 @@ class Decoder(nn.Module):
 
         Returns:
             logits (torch.Tensor): Logits for the last token position (batch_size, vocab_size).
-            last_alpha (torch.Tensor): Cross-attention weights for the last token (batch_size, 197).
+            last_alpha (torch.Tensor or None): Cross-attention weights for the last token.
         """
         device = current_tokens.device
         cur_len = current_tokens.size(1)
@@ -191,7 +191,7 @@ class Decoder(nn.Module):
                 memory=encoder_out,
                 tgt_mask=tgt_mask,
                 tgt_key_padding_mask=tgt_key_padding_mask,
-                return_cross_attn=is_last,
+                return_cross_attn=is_last and return_alphas,
             )
             if is_last and alphas is not None:
                 last_alpha = alphas[:, -1, :]  # (B, 197) for the latest token
@@ -225,7 +225,9 @@ class Decoder(nn.Module):
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
         for _ in range(max_len):
-            logits, step_alpha = self.forward_step(encoder_out, current_tokens)
+            logits, step_alpha = self.forward_step(
+                encoder_out, current_tokens, return_alphas=return_alphas
+            )
 
             # Prevent sampling <pad> or <start>
             logits[:, pad_id] = float("-inf")
