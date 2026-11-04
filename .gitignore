@@ -30,3 +30,5 @@ notebooks/train_model.ipynb
 caption_history.db
 caption_history.db-shm
 caption_history.db-wal
+
+logs/
